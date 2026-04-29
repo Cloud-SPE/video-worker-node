@@ -155,7 +155,15 @@ Sources live in `proto/livepeer/payments/v1/`; generated Go in `proto/gen/go/...
 
 ### Service-registry-daemon gRPC
 
-Sources live in `proto/livepeer/registry/v1/`. The worker's `capabilityreporter` service registers `(capability, model, encoding_tier, gpu_vendor)` tuples on startup and refreshes per the configured interval.
+**v3.0.0:** workers are registry-invisible under archetype A. The
+`capabilityreporter` + `registryclient` packages were removed in the
+v3.0.0 cut. The worker now exposes a uniform `/registry/offerings` HTTP
+endpoint that the orch-coordinator scrapes (per livepeer-modules-project's
+`docs/design-docs/worker-offerings-endpoint.md`). Operator-curated
+roster + secure-orch console signing replaces the old worker-self-
+publishing flow. Vendored proto sources at `proto/livepeer/registry/v1/`
+are kept for the `/registry/offerings` body shape contract; no gRPC
+calls go out from this binary.
 
 ### Bridge HTTP contract
 
