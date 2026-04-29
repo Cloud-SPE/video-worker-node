@@ -1,0 +1,94 @@
+# Dev-friendly compose for the video worker + its two daemons. All
+# three containers share a worker.yaml mounted read-only at
+# /etc/livepeer/worker.yaml; the daemons read their relevant sections
+# (the worker carries its own copy of parsing — see
+# docs/design-docs/architecture.md).
+#
+# Daemons are pulled as published images; this repo has no source
+# dependency on either. Bump *_TAG when a daemon side cuts a new
+# release.
+#
+# Socket layout (shared via two named volumes):
+#   /var/run/livepeer-payment/daemon.sock   ← payment-daemon writes; worker reads
+#   /var/run/livepeer-registry/daemon.sock  ← registry-daemon writes; worker reads
+#
+# Bring it up with:
+#   cp worker.example.yaml worker.yaml   # then edit
+#   docker compose up --build
+#
+# Then hit the worker:
+#   curl http://localhost:8081/healthz
+#   curl http://localhost:8081/capabilities
+#
+# RTMP ingest (only meaningful when --mode=live):
+#   ffmpeg -re -i input.mp4 -c copy -f flv rtmp://localhost:1935/live/<stream-key>
+
+name: livepeer-video-worker
+
+services:
+  payment-daemon:
+    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v1.4.0}
+    command:
+      - "--mode=receiver"
+      - "--socket=/var/run/livepeer-payment/daemon.sock"
+      - "--store-path=/var/lib/livepeer/payment-daemon.db"
+      - "--config=/etc/livepeer/worker.yaml"
+      - "--log-level=info"
+    volumes:
+      - ./worker.yaml:/etc/livepeer/worker.yaml:ro
+      - payment-sock:/var/run/livepeer-payment
+      - payment-data:/var/lib/livepeer
+    restart: unless-stopped
+
+  service-registry-daemon:
+    image: tztcloud/livepeer-service-registry-daemon:${REGISTRY_DAEMON_TAG:-latest}
+    command:
+      - "--mode=publisher"
+      - "--socket=/var/run/livepeer-registry/daemon.sock"
+      - "--config=/etc/livepeer/worker.yaml"
+      - "--log-level=info"
+    volumes:
+      - ./worker.yaml:/etc/livepeer/worker.yaml:ro
+      - registry-sock:/var/run/livepeer-registry
+    restart: unless-stopped
+
+  video-worker:
+    build:
+      context: .
+      target: ${DOCKER_TARGET:-runtime-nvidia}
+    command:
+      - "--mode=${WORKER_MODE:-vod}"
+      - "--config=/etc/livepeer/worker.yaml"
+      - "--log-level=info"
+      # METRICS_PORT activates the Prometheus /metrics listener inside
+      # the container. Set to e.g. 9091 to enable; when unset the flag
+      # is empty and the listener stays off.
+      - "--metrics-listen=${METRICS_PORT:+:${METRICS_PORT}}"
+    ports:
+      - "8081:8081"        # HTTP /v1/* + /stream/*
+      - "1935:1935"        # RTMP ingest (only meaningful when --mode=live)
+    volumes:
+      - ./worker.yaml:/etc/livepeer/worker.yaml:ro
+      - ./presets:/etc/livepeer/presets:ro
+      - payment-sock:/var/run/livepeer-payment:ro
+      - registry-sock:/var/run/livepeer-registry:ro
+      - worker-data:/var/lib/livepeer
+    depends_on:
+      - payment-daemon
+      - service-registry-daemon
+    restart: unless-stopped
+    # NVIDIA build needs the GPU. Drop the deploy block for Intel/AMD
+    # builds (or change DOCKER_TARGET to runtime-{intel,amd}).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  payment-sock:
+  payment-data:
+  registry-sock:
+  worker-data:

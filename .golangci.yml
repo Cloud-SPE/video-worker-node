@@ -1,0 +1,108 @@
+run:
+  timeout: 5m
+  go: "1.23"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - depguard
+
+linters-settings:
+  depguard:
+    rules:
+      no-prometheus-outside-metrics:
+        # The provider boundary owns the Prometheus dependency.
+        # Other layers must call the abstract Recorder interface.
+        files:
+          - "**/internal/types/**"
+          - "**/internal/config/**"
+          - "**/internal/repo/**"
+          - "**/internal/service/**"
+          - "**/internal/runtime/**"
+        deny:
+          - pkg: "github.com/prometheus/client_golang"
+            desc: |
+              Prometheus client may only be imported under internal/providers/metrics/.
+              Other layers must use the Recorder interface (a single-hop providers boundary).
+
+      no-chain-commons:
+        # Workload-only invariant: the worker is portable across payment systems.
+        # Any chain-glue belongs in payment-daemon (separate process, gRPC).
+        files:
+          - "**/internal/**"
+          - "**/cmd/**"
+        deny:
+          - pkg: "github.com/Cloud-SPE/livepeer-modules/chain-commons"
+            desc: |
+              Worker is workload-only; no chain-commons import. See
+              docs/design-docs/core-beliefs.md (this module). If you genuinely
+              need chain interaction, route it through the local payment-daemon
+              over gRPC (internal/providers/paymentclient).
+
+      no-rtmp-outside-ingest:
+        # go-rtmp is the implementation detail of providers/ingest/rtmp/.
+        files:
+          - "**/internal/types/**"
+          - "**/internal/config/**"
+          - "**/internal/repo/**"
+          - "**/internal/service/**"
+          - "**/internal/runtime/**"
+          - "**/internal/providers/ffmpeg/**"
+          - "**/internal/providers/gpu/**"
+          - "**/internal/providers/probe/**"
+          - "**/internal/providers/storage/**"
+          - "**/internal/providers/store/**"
+          - "**/internal/providers/hls/**"
+          - "**/internal/providers/webhooks/**"
+          - "**/internal/providers/paymentclient/**"
+          - "**/internal/providers/registryclient/**"
+          - "**/internal/providers/metrics/**"
+          - "**/internal/providers/logger/**"
+          - "**/internal/providers/clock/**"
+          - "**/internal/providers/thumbnails/**"
+          - "**/internal/providers/filters/**"
+          - "**/internal/providers/progress/**"
+        deny:
+          - pkg: "github.com/yutopp/go-rtmp"
+            desc: |
+              go-rtmp may only be imported under internal/providers/ingest/rtmp/.
+              Other code interacts with ingest through the IngestProvider interface.
+
+      no-exec-outside-ffmpeg-and-gpu:
+        # FFmpeg subprocess + GPU vendor probes are the only os/exec users.
+        files:
+          - "**/internal/types/**"
+          - "**/internal/config/**"
+          - "**/internal/repo/**"
+          - "**/internal/service/**"
+          - "**/internal/runtime/**"
+          - "**/internal/providers/ingest/**"
+          - "**/internal/providers/storage/**"
+          - "**/internal/providers/store/**"
+          - "**/internal/providers/hls/**"
+          - "**/internal/providers/webhooks/**"
+          - "**/internal/providers/paymentclient/**"
+          - "**/internal/providers/registryclient/**"
+          - "**/internal/providers/metrics/**"
+          - "**/internal/providers/logger/**"
+          - "**/internal/providers/clock/**"
+          - "**/internal/providers/thumbnails/**"
+          - "**/internal/providers/filters/**"
+          - "**/internal/providers/progress/**"
+        deny:
+          - pkg: "os/exec"
+            desc: |
+              os/exec may only be used under internal/providers/ffmpeg/ and
+              internal/providers/gpu/. Other layers go through those providers'
+              interfaces (single-hop providers boundary).
+
+issues:
+  exclude-rules:
+    # Test files often need stdlib niceties the depguard rules forbid.
+    - path: _test\.go
+      linters:
+        - depguard

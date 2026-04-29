@@ -1,0 +1,23 @@
+# ABR ladder — standard. 360p / 720p / 1080p H.264.
+presets:
+  - name: abr-360p
+    codec: h264
+    width_max: 640
+    height_max: 360
+    bitrate_kbps: 800
+    profile: main
+    gop_seconds: 2.0
+  - name: abr-720p
+    codec: h264
+    width_max: 1280
+    height_max: 720
+    bitrate_kbps: 2500
+    profile: main
+    gop_seconds: 2.0
+  - name: abr-1080p
+    codec: h264
+    width_max: 1920
+    height_max: 1080
+    bitrate_kbps: 5000
+    profile: high
+    gop_seconds: 2.0

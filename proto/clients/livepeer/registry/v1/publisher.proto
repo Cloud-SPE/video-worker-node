@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package livepeer.registry.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "livepeer/registry/v1/resolver.proto";
+import "livepeer/registry/v1/types.proto";
+
+option go_package = "github.com/Cloud-SPE/livepeer-video-platform/apps/transcode-worker-node/proto/clients/livepeer/registry/v1;registryv1";
+
+service Publisher {
+  rpc BuildManifest(BuildManifestRequest) returns (BuildResult);
+  rpc SignManifest(SignManifestRequest) returns (SignedManifest);
+  rpc WriteServiceURI(WriteServiceURIRequest) returns (TxHashResult);
+  rpc ProbeWorker(ProbeWorkerRequest) returns (ProbeResult);
+  rpc Health(google.protobuf.Empty) returns (HealthResult);
+}
+
+message BuildManifestRequest {
+  repeated Node             nodes      = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message BuildResult {
+  bytes manifest_json    = 1;
+  bytes canonical_bytes  = 2;
+  string canonical_sha256 = 3;
+}
+
+message SignManifestRequest {
+  bytes manifest_json = 1;
+}
+
+message SignedManifest {
+  bytes  manifest_json   = 1;
+  string signature_value = 2;  // 0x-prefixed 130-hex
+}
+
+message WriteServiceURIRequest {
+  string uri = 1;
+}
+
+message TxHashResult {
+  string tx_hash = 1;
+}
+
+message ProbeWorkerRequest {
+  string url            = 1;
+  int32  timeout_seconds = 2;
+}
+
+message ProbeResult {
+  bytes capabilities_json = 1;
+}

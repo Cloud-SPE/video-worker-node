@@ -1,0 +1,63 @@
+# worker.example.yaml — operator config template for livepeer-video-worker-node.
+#
+# Copy to worker.yaml and edit. The daemon reads CLI flags or env vars by
+# default; YAML config is via --config=path/to/worker.yaml. This template
+# documents the full surface so operators know what's available.
+
+mode: vod                          # vod | abr | live
+gpu_vendor: nvidia                 # nvidia | intel | amd | auto
+ffmpeg_bin: /usr/local/bin/ffmpeg
+presets_file: /etc/livepeer/presets/h264-vod.yaml
+store_path: /var/lib/livepeer/transcode-state.db
+
+http_listen: :8081
+grpc_socket: /var/run/livepeer-video-worker.sock
+metrics_listen: :9091              # off if empty
+
+# v3.0.0: registry-facing fields (public_url, node_id, region,
+# operator_address, price_wei_per_unit, registry_socket,
+# registry_refresh) are removed. Workers are registry-invisible
+# under archetype A; the orch-coordinator carries node identity
+# + region + pricing in its operator-curated roster.
+
+payment_socket: /var/run/livepeer-payment/daemon.sock
+
+# ---- ingest (live mode only) ----
+ingest:
+  rtmp:
+    enabled: true
+    listen: :1935
+    max_concurrent: 4
+  # srt:                            # tech-debt
+  # whip:                           # tech-debt (WebRTC)
+
+# ---- live streaming-session knobs (per docs/design-docs/streaming-session-live-mode.md) ----
+live:
+  preset: h264-live.yaml
+  recording_enabled: true
+  debit_cadence: 5s
+  stream_runway_seconds: 30
+  stream_grace_seconds: 60
+  stream_pre_credit_seconds: 60
+  stream_restart_limit: 3
+  stream_topup_min_interval: 5s
+
+# ---- webhooks ----
+webhook:
+  url: https://platform.example.com/webhooks/worker
+  secret_env: WORKER_WEBHOOK_SECRET
+
+# ---- capability advertising ----
+capabilities:
+  - video.transcode.vod
+  - video.transcode.abr
+  - video.live.rtmp
+  # video.live.srt — tech-debt
+  # video.realtime.whip — tech-debt (WebRTC)
+
+# ---- auth ----
+auth_token: ""                     # optional bearer for the public HTTP API
+
+# ---- log ----
+log_level: info                    # error|warn|info|debug
+log_format: text                   # text|json

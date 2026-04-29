@@ -1,0 +1,29 @@
+# Go binaries (Phase 2)
+/livepeer-video-worker-node
+/bin/
+/dist/
+
+# Go test artifacts
+*.out
+*.test
+coverage.out
+coverage.html
+
+# Local config
+/.env
+/worker.yaml
+!/worker.example.yaml
+
+# Editor / IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Operating data (BoltDB, FFmpeg scratch)
+/data/
+/tmp/
+
+# Docker scratch
+/.docker-cache/

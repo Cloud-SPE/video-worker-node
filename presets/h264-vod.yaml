@@ -1,0 +1,23 @@
+# H.264 streaming presets — single-rendition VOD output.
+presets:
+  - name: 360p-h264
+    codec: h264
+    width_max: 640
+    height_max: 360
+    bitrate_kbps: 800
+    profile: main
+    gop_seconds: 2.0
+  - name: 720p-h264
+    codec: h264
+    width_max: 1280
+    height_max: 720
+    bitrate_kbps: 2500
+    profile: main
+    gop_seconds: 2.0
+  - name: 1080p-h264
+    codec: h264
+    width_max: 1920
+    height_max: 1080
+    bitrate_kbps: 5000
+    profile: high
+    gop_seconds: 2.0

@@ -1,0 +1,85 @@
+# coverage-gate exemptions for livepeer-video-worker-node.
+#
+# Format: one import path per line; lines starting with # are comments;
+# every exemption MUST have a written reason after '#' on the same line.
+#
+# This worker has a longer exemption list than its sister
+# openai-worker-node because FFmpeg subprocess wiring, GPU hardware
+# probing, RTMP I/O, and HLS manifest assembly are integration-tested
+# rather than unit-tested.
+
+# Cmd entry point: provider wiring + flag parsing + os.Exit paths.
+# Covered end-to-end by run_test.go (--help, invalid config, dev boot+
+# shutdown for vod/abr/live).
+github.com/Cloud-SPE/video-worker-node/cmd/livepeer-video-worker-node
+
+# Generated proto stubs (produced by `make proto`). Do not unit-test.
+github.com/Cloud-SPE/video-worker-node/proto/clients/livepeer/payments/v1
+github.com/Cloud-SPE/video-worker-node/proto/clients/livepeer/registry/v1
+
+# Empty top-level package (doc.go only).
+github.com/Cloud-SPE/video-worker-node
+
+# FFmpeg subprocess wrapper. SystemRunner path requires a real ffmpeg
+# binary; BuildArgs / FakeRunner / progress parsing are unit-tested.
+# Real subprocess lifecycle (SIGTERM/SIGKILL grace, log capture, exit
+# code propagation) is integration-tested.
+github.com/Cloud-SPE/video-worker-node/internal/providers/ffmpeg
+
+# ffprobe subprocess wrapper. Same story: ParseProbeJSON + FakeProber
+# are unit-tested; SystemProber is integration-only.
+github.com/Cloud-SPE/video-worker-node/internal/providers/probe
+
+# RTMP ingest provider. The accept loop + go-rtmp Server lifecycle is
+# integration-tested via real RTMP-client → worker tests against the
+# compose stack. Unit tests cover protocol identity, defaults,
+# Listen/Stop sequencing, double-listen.
+github.com/Cloud-SPE/video-worker-node/internal/providers/ingest/rtmp
+
+# Lifecycle goroutine fan-out. Most failure modes are detected only
+# under racing live runners + listeners; unit tests cover mode
+# validation, error propagation, HTTP-only path.
+github.com/Cloud-SPE/video-worker-node/internal/runtime/lifecycle
+
+# HTTP handler — unit tests cover health/capabilities/stream-start
+# happy path + wrong-mode + missing-fields + auth middleware. Remaining
+# branches (payment + topup + status against the live runner) are
+# integration-tested via the compose-stack end-to-end suite.
+github.com/Cloud-SPE/video-worker-node/internal/runtime/http
+
+# Lint stubs that delegate to depguard. They have main.go but their
+# Run() is a no-op (see also: doc-gardener tech-debt entry). Nothing
+# to unit-test until they grow real rules.
+github.com/Cloud-SPE/video-worker-node/lint/doc-gardener
+github.com/Cloud-SPE/video-worker-node/lint/layer-check
+
+# no-secrets-in-logs lint walks the source tree and emits hints. Tested
+# only indirectly (the lint passing across the codebase IS the test).
+# Adding fixture-based tests is a follow-up if needed.
+github.com/Cloud-SPE/video-worker-node/lint/no-secrets-in-logs
+
+# Live runner state machine. The validate-key → session-active → tick
+# → ended → recording-finalized happy path is unit-tested with a
+# scripted-encoder + shellclient.Fake (8 tests covering accept, reject,
+# validate-error, tick, runway-topup, grace-expiry, encoder-error,
+# persisted state). Late-stage branches that depend on a real FFmpeg
+# subprocess + real S3 upload latency (final-tick reconciliation under
+# cancellation, mirror-final-scan during ctx.Done) are integration-
+# tested via the compose-stack end-to-end suite on a GPU runner.
+# 67.6% today; lifts above 75% once the e2e suite is wired into CI.
+github.com/Cloud-SPE/video-worker-node/internal/service/liverunner
+
+# Worker → shell HTTP client. Six /internal/live/* endpoints over net/http
+# with shared-secret auth + timeout handling. Wire-protocol shape +
+# error mapping covered by Fake unit tests (8 tests); the System impl's
+# net.Dial / Transport / TLS paths are integration-tested with a real
+# shell behind the compose-stack e2e harness.
+github.com/Cloud-SPE/video-worker-node/internal/providers/shellclient
+
+# Live segment mirror (livecdn). 8 unit tests cover the LocalFSSink +
+# InMemorySink, the master-manifest writer, segment+playlist upload,
+# rotation-driven deletes, and segment-list tracking. The remaining
+# gap is the long-running `Run(ctx)` loop's poll cadence + error-
+# channel fall-through; exercised by the compose-stack e2e suite
+# (real FFmpeg writing into a real LocalFSSink). 73.5% today.
+github.com/Cloud-SPE/video-worker-node/internal/service/livecdn

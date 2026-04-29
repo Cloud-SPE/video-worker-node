@@ -1,0 +1,95 @@
+name: lint
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  golangci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          # Pin a specific golangci-lint version. Re-triage on default-
+          # linter changes is a manual act — bump with a re-triage
+          # commit; don't chase `latest`.
+          version: v2.11.4
+
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            echo
+            echo "--- diff ---"
+            gofmt -d .
+            exit 1
+          fi
+
+  go-mod-tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - name: verify go.mod / go.sum are tidy
+        run: |
+          cp go.mod go.mod.before
+          [ -f go.sum ] && cp go.sum go.sum.before || true
+          go mod tidy
+          if ! diff -u go.mod.before go.mod > /dev/null; then
+            echo "::error::go mod tidy produced changes — commit them."
+            diff -u go.mod.before go.mod || true
+            exit 1
+          fi
+          if [ -f go.sum.before ] && ! diff -u go.sum.before go.sum > /dev/null; then
+            echo "::error::go mod tidy changed go.sum — commit it."
+            diff -u go.sum.before go.sum || true
+            exit 1
+          fi
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    # Findings are informational, not blocking. Most hits are stdlib
+    # CVEs that trail the latest Go patch-release; bump the `toolchain`
+    # directive in go.mod to absorb them. Non-stdlib hits SHOULD be
+    # addressed — review this job's output on every PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  custom-lints:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - name: no-cgo (FFmpeg is a subprocess, never a binding)
+        run: go run ./lint/no-cgo/... ./...
+      - name: no-chain-commons (workload portability across payment systems)
+        run: go run ./lint/no-chain-commons/... ./...
+      - name: layer-check (forward-only layer rule)
+        run: go run ./lint/layer-check/... ./...
+      - name: no-secrets-in-logs (stream keys redacted to 6-char prefix)
+        run: go run ./lint/no-secrets-in-logs/... ./...

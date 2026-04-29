@@ -1,0 +1,146 @@
+# Production worker-side stack.
+#
+# Standalone — paste into Portainer as a single Stack, or run:
+#   docker compose -f compose.prod.yaml --env-file .env up -d
+#
+# Three services:
+#   - payment-daemon          (receiver mode, Arbitrum One mainnet)
+#   - service-registry-daemon (publisher mode, advertises capabilities)
+#   - video-worker            (the Go daemon, GPU-aware)
+#
+# Ingress:
+#   Cloudflare Tunnel hits `video-worker:8081` (HTTP) directly, and
+#   the public RTMP URL points at port 1935. If cloudflared runs as a
+#   docker container, attach it to the `cf-tunnel` external network
+#   defined below. If cloudflared runs on the host (systemd / package
+#   install), use the published ports.
+#
+# See docs/operations/running-the-daemon.md for the full walkthrough.
+
+name: livepeer-video-worker
+
+services:
+  payment-daemon:
+    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v1.4.0}
+    restart: unless-stopped
+    command:
+      - --mode=receiver
+      - --socket=/var/run/livepeer-payment/daemon.sock
+      - --store-path=/var/lib/livepeer/payment-daemon.db
+      - --config=/etc/livepeer/worker.yaml
+      - --chain-rpc=${CHAIN_RPC:?set CHAIN_RPC (Arbitrum One mainnet RPC URL)}
+      - --keystore-path=/etc/livepeer/keystore.json
+      - --keystore-password-file=/etc/livepeer/keystore-password
+      - --redemption-interval=30s
+      - --log-level=${DAEMON_LOG_LEVEL:-info}
+    volumes:
+      - ${WORKER_YAML_PATH:-./worker.yaml}:/etc/livepeer/worker.yaml:ro
+      - ${RECIPIENT_KEYSTORE_PATH:-./keystore.json}:/etc/livepeer/keystore.json:ro
+      - ${RECIPIENT_KEYSTORE_PASSWORD_PATH:-./keystore-password}:/etc/livepeer/keystore-password:ro
+      - payment-sock:/var/run/livepeer-payment
+      - payment-data:/var/lib/livepeer
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512m
+    security_opt:
+      - no-new-privileges:true
+
+  service-registry-daemon:
+    image: tztcloud/livepeer-service-registry-daemon:${REGISTRY_DAEMON_TAG:-v1.2.0}
+    restart: unless-stopped
+    command:
+      - --mode=publisher
+      - --socket=/var/run/livepeer-registry/daemon.sock
+      - --config=/etc/livepeer/worker.yaml
+      - --log-level=${REGISTRY_LOG_LEVEL:-info}
+    volumes:
+      - ${WORKER_YAML_PATH:-./worker.yaml}:/etc/livepeer/worker.yaml:ro
+      - registry-sock:/var/run/livepeer-registry
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
+    security_opt:
+      - no-new-privileges:true
+
+  video-worker:
+    image: tztcloud/livepeer-video-worker-node-${GPU_VENDOR:-nvidia}:${WORKER_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      - payment-daemon
+      - service-registry-daemon
+    command:
+      - --mode=${WORKER_MODE:-vod}
+      - --config=/etc/livepeer/worker.yaml
+      - --log-level=${WORKER_LOG_LEVEL:-info}
+      # METRICS_PORT (default empty) enables the Prometheus /metrics
+      # listener inside the container. See .env.example.
+      - --metrics-listen=${METRICS_PORT:+:${METRICS_PORT}}
+    volumes:
+      - ${WORKER_YAML_PATH:-./worker.yaml}:/etc/livepeer/worker.yaml:ro
+      - ${PRESETS_PATH:-./presets}:/etc/livepeer/presets:ro
+      - payment-sock:/var/run/livepeer-payment:ro
+      - registry-sock:/var/run/livepeer-registry:ro
+      - worker-data:/var/lib/livepeer
+    ports:
+      # HTTP — published to the host so cloudflared (if running outside
+      # docker) can reach it. Drop this block if cloudflared shares
+      # the cf-tunnel network and reaches the container by name.
+      - '${WORKER_HOST_PORT:-8081}:8081'
+      # RTMP ingest — only meaningful when WORKER_MODE=live.
+      - '${RTMP_HOST_PORT:-1935}:1935'
+      # Metrics port — published only when METRICS_PORT is set.
+      # Bind to 127.0.0.1 if you only want a local Prometheus scraper
+      # to reach it. Uncomment after setting METRICS_PORT in .env:
+      #   - '127.0.0.1:${METRICS_PORT}:${METRICS_PORT}'
+    networks:
+      - default
+      - cf-tunnel
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4g
+        reservations:
+          devices:
+            # NVIDIA is the default; for Intel/AMD set GPU_VENDOR
+            # accordingly and DROP this `devices` block (the VAAPI/QSV
+            # variants don't use the nvidia container runtime).
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  payment-sock:
+  payment-data:
+  registry-sock:
+  worker-data:
+
+networks:
+  default:
+  # External network shared with cloudflared's stack. The cloudflared
+  # tunnel config can then point at `http://video-worker:8081`. Create
+  # it once on the host (`docker network create cf-tunnel`) before the
+  # first `up`.
+  cf-tunnel:
+    external: true

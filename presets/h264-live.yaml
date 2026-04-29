@@ -1,0 +1,43 @@
+# Live HLS encode ladder. NVENC-only at MVP per plan 0006 §D — Intel/AMD
+# live verify is a follow-up. Five H.264 rungs, 4-second segments, rolling
+# 6-segment DVR window (24s).
+#
+# These rungs are consumed both by the FFmpeg LiveSystemEncoder (which
+# builds the multi-rendition argv) and by the live HLS master-manifest
+# writer (which emits one EXT-X-STREAM-INF per rung).
+presets:
+  - name: 240p-h264-live
+    codec: h264
+    width_max: 426
+    height_max: 240
+    bitrate_kbps: 400
+    profile: baseline
+    gop_seconds: 4.0
+  - name: 360p-h264-live
+    codec: h264
+    width_max: 640
+    height_max: 360
+    bitrate_kbps: 800
+    profile: baseline
+    gop_seconds: 4.0
+  - name: 480p-h264-live
+    codec: h264
+    width_max: 854
+    height_max: 480
+    bitrate_kbps: 1400
+    profile: main
+    gop_seconds: 4.0
+  - name: 720p-h264-live
+    codec: h264
+    width_max: 1280
+    height_max: 720
+    bitrate_kbps: 2800
+    profile: main
+    gop_seconds: 4.0
+  - name: 1080p-h264-live
+    codec: h264
+    width_max: 1920
+    height_max: 1080
+    bitrate_kbps: 5000
+    profile: high
+    gop_seconds: 4.0

@@ -1,0 +1,106 @@
+// Livepeer Payments v1 — PayerDaemon service.
+//
+// The PayerDaemon runs next to a payer application (a specialized PayerApp —
+// e.g., an OpenAI bridge or a Livepeer gateway). It creates and signs tickets,
+// manages per-session sender nonces, and watches the payer's on-chain escrow.
+//
+// This service is mounted only when the daemon is started with
+// `--mode=sender`. Calls to it in receiver mode return UNIMPLEMENTED.
+
+syntax = "proto3";
+
+package livepeer.payments.v1;
+
+option go_package = "github.com/Cloud-SPE/livepeer-video-platform/apps/transcode-worker-node/proto/clients/livepeer/payments/v1;paymentsv1";
+
+import "livepeer/payments/v1/types.proto";
+
+service PayerDaemon {
+  // Start a new payment session against a given payee's advertised ticket
+  // parameters. Returns a `work_id` that subsequent `CreatePayment` calls
+  // reference. One session should cover one ongoing work relationship between
+  // this payer and a specific payee (not one per HTTP call — amortize).
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+
+  // Create a payment blob (a `Payment` with one or more tickets) covering a
+  // requested number of work units against an existing session. The returned
+  // bytes are the exact wire-format `Payment` to hand to the payee.
+  rpc CreatePayment(CreatePaymentRequest) returns (CreatePaymentResponse);
+
+  // Close a session and free its nonce state.
+  rpc CloseSession(PayerDaemonCloseSessionRequest) returns (PayerDaemonCloseSessionResponse);
+
+  // Inspect the payer's current TicketBroker deposit/reserve state. Read-only;
+  // the daemon does not fund escrow.
+  rpc GetDepositInfo(GetDepositInfoRequest) returns (GetDepositInfoResponse);
+}
+
+message StartSessionRequest {
+  // Ticket parameters as returned by the payee's `GetQuote`.
+  TicketParams ticket_params = 1;
+
+  // Optional caller-chosen label used only in the daemon's audit log.
+  string label = 2;
+
+  // Price the payee committed to when issuing `ticket_params`. The daemon
+  // stores this price on the session and:
+  //   1. Embeds it in every Payment as `expected_price` so the payee's
+  //      `recipientRand` HMAC inputs match what they used at quote time.
+  //      Without it, the payee re-derives `recipientRand` against price=0
+  //      and the recipient_rand_hash check fails — see receiver.go's
+  //      `computeRecipientRand`.
+  //   2. Sizes ticket batches against `work_units × price`.
+  //
+  // REQUIRED for any session that will produce non-free tickets. Free /
+  // bootstrap sessions may pass `{ price_per_unit_wei: "0", pixels_per_unit: "1" }`.
+  PriceInfo price_info = 3;
+}
+
+message StartSessionResponse {
+  // Opaque session identifier. Include in subsequent `CreatePayment` /
+  // `CloseSession` calls for this relationship.
+  string work_id = 1;
+}
+
+message CreatePaymentRequest {
+  // Session previously returned by `StartSession`.
+  string work_id = 1;
+
+  // Number of work units the payment should cover. The daemon consults the
+  // session's PriceInfo and produces tickets whose cumulative expected value
+  // >= `work_units × price`.
+  int64 work_units = 2;
+}
+
+message CreatePaymentResponse {
+  // Wire-format `livepeer.payments.v1.Payment` bytes. The caller attaches
+  // these to its app-level request to the payee (typically as an HTTP header).
+  bytes payment_bytes = 1;
+
+  // Number of tickets this payment carries (for metrics / audit).
+  int32 tickets_created = 2;
+
+  // Aggregate expected value (EV = face_value × win_prob) committed by this
+  // payment, in wei, big-endian bytes.
+  bytes expected_value = 3;
+}
+
+message PayerDaemonCloseSessionRequest {
+  string work_id = 1;
+}
+
+message PayerDaemonCloseSessionResponse {}
+
+message GetDepositInfoRequest {}
+
+message GetDepositInfoResponse {
+  // Current on-chain deposit (wei, big-endian bytes).
+  bytes deposit = 1;
+
+  // Current on-chain reserve (wei, big-endian bytes).
+  bytes reserve = 2;
+
+  // If the payer has initiated an unlock, the round at which withdrawal
+  // becomes possible. Zero when no unlock is pending.
+  int64 withdraw_round = 3;
+}
