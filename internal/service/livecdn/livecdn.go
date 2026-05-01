@@ -45,10 +45,10 @@ type Mirror struct {
 	// Default: 500ms.
 	PollInterval time.Duration
 
-	mu        sync.Mutex
-	known     map[string]int64 // local relpath → last-seen size
-	segments  []string         // every segment ever uploaded (recording-bridge input)
-	logErr    func(err error)
+	mu       sync.Mutex
+	known    map[string]int64 // local relpath → last-seen size
+	segments []string         // every segment ever uploaded (recording-bridge input)
+	logErr   func(err error)
 }
 
 // NewMirror constructs a Mirror. `Run` blocks until ctx is cancelled.

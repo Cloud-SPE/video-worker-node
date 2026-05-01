@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/golang/protobuf v1.5.4
+	github.com/yutopp/go-rtmp v0.0.7
 	go.etcd.io/bbolt v1.4.3
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -17,7 +18,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.7.0 // indirect
 	github.com/yutopp/go-amf0 v0.1.0 // indirect
-	github.com/yutopp/go-rtmp v0.0.7 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect

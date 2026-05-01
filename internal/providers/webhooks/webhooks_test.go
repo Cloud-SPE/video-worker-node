@@ -132,7 +132,12 @@ func TestHTTPSenderCtxCancel(t *testing.T) {
 	s := &HTTPSender{
 		Client:   rc,
 		Backoffs: []time.Duration{1 * time.Millisecond, 1 * time.Millisecond, 1 * time.Millisecond},
-		SleepFn:  func(time.Duration) { calls++; if calls == 1 { cancel() } },
+		SleepFn: func(time.Duration) {
+			calls++
+			if calls == 1 {
+				cancel()
+			}
+		},
 	}
 	err := s.Send(ctx, Delivery{URL: "https://example", Event: "e"})
 	if !errors.Is(err, context.Canceled) {

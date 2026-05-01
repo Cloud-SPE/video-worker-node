@@ -139,10 +139,10 @@ func TestLiveSystemEncoderCancelsCleanly(t *testing.T) {
 	// confirm the bin lookup error path: a bogus binary produces a
 	// startup error within the grace window.
 	enc := NewLiveSystemEncoder(LiveJob{
-		LocalDir: t.TempDir(),
-		Bin:      "/nonexistent-ffmpeg-binary",
-		Ladder:   sampleLadder(),
-		GPU:      types.GPUProfile{Vendor: types.GPUVendorNVIDIA, SupportsH264: true},
+		LocalDir:    t.TempDir(),
+		Bin:         "/nonexistent-ffmpeg-binary",
+		Ladder:      sampleLadder(),
+		GPU:         types.GPUProfile{Vendor: types.GPUVendorNVIDIA, SupportsH264: true},
 		CancelGrace: 100 * time.Millisecond,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

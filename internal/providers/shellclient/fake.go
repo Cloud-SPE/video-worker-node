@@ -100,11 +100,31 @@ func (f *Fake) Topup(ctx context.Context, in TopupInput) (TopupResult, error) {
 func (f *Fake) Snapshot() FakeSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	cp := func(in []ValidateKeyInput) []ValidateKeyInput { o := make([]ValidateKeyInput, len(in)); copy(o, in); return o }
-	cp2 := func(in []SessionActiveInput) []SessionActiveInput { o := make([]SessionActiveInput, len(in)); copy(o, in); return o }
-	cp3 := func(in []SessionTickInput) []SessionTickInput { o := make([]SessionTickInput, len(in)); copy(o, in); return o }
-	cp4 := func(in []SessionEndedInput) []SessionEndedInput { o := make([]SessionEndedInput, len(in)); copy(o, in); return o }
-	cp5 := func(in []RecordingFinalizedInput) []RecordingFinalizedInput { o := make([]RecordingFinalizedInput, len(in)); copy(o, in); return o }
+	cp := func(in []ValidateKeyInput) []ValidateKeyInput {
+		o := make([]ValidateKeyInput, len(in))
+		copy(o, in)
+		return o
+	}
+	cp2 := func(in []SessionActiveInput) []SessionActiveInput {
+		o := make([]SessionActiveInput, len(in))
+		copy(o, in)
+		return o
+	}
+	cp3 := func(in []SessionTickInput) []SessionTickInput {
+		o := make([]SessionTickInput, len(in))
+		copy(o, in)
+		return o
+	}
+	cp4 := func(in []SessionEndedInput) []SessionEndedInput {
+		o := make([]SessionEndedInput, len(in))
+		copy(o, in)
+		return o
+	}
+	cp5 := func(in []RecordingFinalizedInput) []RecordingFinalizedInput {
+		o := make([]RecordingFinalizedInput, len(in))
+		copy(o, in)
+		return o
+	}
 	cp6 := func(in []TopupInput) []TopupInput { o := make([]TopupInput, len(in)); copy(o, in); return o }
 	return FakeSnapshot{
 		Validate:           cp(f.ValidateCalls),

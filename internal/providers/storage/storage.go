@@ -108,8 +108,8 @@ func (h *HTTP) Upload(ctx context.Context, url, srcPath string, contentType stri
 // Fake is an in-memory Storage for tests. Fetch reads from Inputs[url];
 // Upload records the bytes in Uploads[url].
 type Fake struct {
-	Inputs  map[string][]byte
-	Uploads map[string][]byte
+	Inputs     map[string][]byte
+	Uploads    map[string][]byte
 	FailFetch  string
 	FailUpload string
 }

@@ -51,9 +51,9 @@ func newTestEnv(t *testing.T) (*Runner, *storage.Fake, *webhooks.FakeSender, *pa
 	wh := &webhooks.FakeSender{}
 	r, err := New(Config{
 		Repo: repo, FFmpeg: &ffmpeg.FakeRunner{Steps: 1},
-		Probe: probe.FakeProber{R: probe.Result{Width: 1, Height: 1}},
+		Probe:   probe.FakeProber{R: probe.Result{Width: 1, Height: 1}},
 		Storage: stg, Webhook: wh, Payment: pay, Presets: pl,
-		GPU: types.GPUProfile{Vendor: types.GPUVendorNVIDIA, SupportsH264: true},
+		GPU:     types.GPUProfile{Vendor: types.GPUVendorNVIDIA, SupportsH264: true},
 		TempDir: dir, Logger: logger.Discard(),
 	})
 	if err != nil {
@@ -177,7 +177,7 @@ func TestRunFFmpegFails(t *testing.T) {
 	r.cfg.FFmpeg = &ffmpeg.FakeRunner{FailWithExit: 1}
 	plan := ABRJob{
 		JobID: "j", InputURL: "http://in/x", PresetNames: []string{"360p"},
-		MasterOutputURL: "m",
+		MasterOutputURL:  "m",
 		RenditionOutputs: map[string]string{"360p": "u"},
 	}
 	r.Submit(context.Background(), plan)

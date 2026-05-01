@@ -33,10 +33,10 @@ type Broker interface {
 
 // Receipt describes the result of a ProcessPayment call.
 type Receipt struct {
-	Sender         []byte
-	CreditedWei    []byte
-	BalanceWei     []byte
-	WinnersQueued  int32
+	Sender        []byte
+	CreditedWei   []byte
+	BalanceWei    []byte
+	WinnersQueued int32
 }
 
 // ErrInvalidPayment is returned when ProcessPayment rejects the ticket.

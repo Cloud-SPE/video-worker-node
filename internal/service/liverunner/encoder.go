@@ -27,10 +27,10 @@ type Encoder interface {
 
 // EncoderInput bundles everything an encoder impl needs from the runner.
 type EncoderInput struct {
-	StreamID    string
-	Reader      io.Reader
-	MediaFormat string // "flv" for RTMP
-	Preset      string
+	StreamID      string
+	Reader        io.Reader
+	MediaFormat   string // "flv" for RTMP
+	Preset        string
 	StoragePrefix string // e.g. "live/{stream_id}"
 }
 

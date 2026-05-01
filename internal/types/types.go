@@ -97,18 +97,18 @@ type Job struct {
 
 // Capability is a registry-facing capability advertisement.
 type Capability struct {
-	Name        string  `json:"name"`
-	WorkUnit    string  `json:"work_unit"`
-	Models      []Model `json:"models,omitempty"`
-	Capacity    int32   `json:"capacity"`
-	PriceWei    string  `json:"price_wei,omitempty"`
+	Name     string  `json:"name"`
+	WorkUnit string  `json:"work_unit"`
+	Models   []Model `json:"models,omitempty"`
+	Capacity int32   `json:"capacity"`
+	PriceWei string  `json:"price_wei,omitempty"`
 }
 
 // Model is a single supported model under a capability.
 type Model struct {
-	ID                string `json:"id"`
-	PriceWeiPerUnit   string `json:"price_wei_per_unit"`
-	Warm              bool   `json:"warm"`
+	ID              string `json:"id"`
+	PriceWeiPerUnit string `json:"price_wei_per_unit"`
+	Warm            bool   `json:"warm"`
 }
 
 // GPUVendor identifies the host's installed GPU vendor.
@@ -222,10 +222,10 @@ func (c PresetCatalogue) Filter(g GPUProfile) []Preset {
 // JobError is an error with a structured code, suitable for both logs and
 // the public HTTP response.
 type JobError struct {
-	Code    string
-	Message string
+	Code     string
+	Message  string
 	ExitCode int
-	Stderr  string
+	Stderr   string
 }
 
 // Error renders the JobError; satisfies error.
@@ -264,13 +264,13 @@ const (
 type StreamPhase string
 
 const (
-	StreamPhaseStarting        StreamPhase = "starting"
-	StreamPhaseStreaming       StreamPhase = "streaming"
-	StreamPhaseLowBalance      StreamPhase = "low_balance"
-	StreamPhasePaymentLost     StreamPhase = "payment_unreachable"
-	StreamPhaseClosing         StreamPhase = "closing"
-	StreamPhaseClosed          StreamPhase = "closed"
-	StreamPhaseEncoderFailed   StreamPhase = "encoder_failed"
+	StreamPhaseStarting         StreamPhase = "starting"
+	StreamPhaseStreaming        StreamPhase = "streaming"
+	StreamPhaseLowBalance       StreamPhase = "low_balance"
+	StreamPhasePaymentLost      StreamPhase = "payment_unreachable"
+	StreamPhaseClosing          StreamPhase = "closing"
+	StreamPhaseClosed           StreamPhase = "closed"
+	StreamPhaseEncoderFailed    StreamPhase = "encoder_failed"
 	StreamPhaseBalanceExhausted StreamPhase = "balance_exhausted"
 )
 

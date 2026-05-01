@@ -69,8 +69,8 @@ func TestRunGPUNoneIsFatal(t *testing.T) {
 	bin := filepath.Join(dir, "ffmpeg")
 	os.WriteFile(bin, []byte(""), 0o755)
 	_, err := Run(context.Background(), Config{
-		Mode: types.ModeVOD,
-		Detector: gpu.FakeDetector{Profile: types.GPUProfile{Vendor: types.GPUVendorNone}},
+		Mode:      types.ModeVOD,
+		Detector:  gpu.FakeDetector{Profile: types.GPUProfile{Vendor: types.GPUVendorNone}},
 		FFmpegBin: bin, Logger: logger.Discard(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "PREFLIGHT_NO_GPU") {

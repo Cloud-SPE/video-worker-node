@@ -111,7 +111,7 @@ func (r *Runner) Submit(ctx context.Context, j ABRJob) error {
 		InputURL: j.InputURL, OutputURL: j.MasterOutputURL,
 		WebhookURL: j.WebhookURL, WebhookSecret: j.WebhookSecret,
 		WorkID: j.WorkID, Sender: j.Sender, UnitsPer: j.UnitsPerRend,
-		Preset: presetListPseudoName(j.PresetNames),
+		Preset:    presetListPseudoName(j.PresetNames),
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := r.cfg.Repo.Save(ctx, parent); err != nil {

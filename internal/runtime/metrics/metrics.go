@@ -24,11 +24,11 @@ import (
 
 // Server wraps the listener.
 type Server struct {
-	addr     string
+	addr      string
 	maxSeries int
-	srv      *http.Server
+	srv       *http.Server
 	boundAddr string
-	mu       sync.Mutex
+	mu        sync.Mutex
 }
 
 // New constructs a Server. Returns nil + nil error if addr is empty

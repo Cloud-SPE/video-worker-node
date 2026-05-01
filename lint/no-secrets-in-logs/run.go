@@ -17,11 +17,11 @@ import (
 )
 
 var (
-	logCall      = regexp.MustCompile(`\b(?:logger|log|slog|cfg\.Logger|r\.cfg\.Logger|s\.logger)\.(?:Info|Warn|Error|Debug|Print(?:f|ln)?|Errorf|Fatalf)\(`)
-	secretToken  = regexp.MustCompile(`\b(?:[A-Za-z0-9_]*?(?:secret|password|passwd)[A-Za-z0-9_]*|stream[_-]?key|api[_-]?key|private[_-]?key|signing[_-]?key|access[_-]?token|bearer[_-]?token|auth[_-]?token)\b`)
-	safeToken    = regexp.MustCompile(`\b(?:key_hash|keyHash|api_key_hash|apiKeyHash|stream_key_hash|streamKeyHash|csrf_token|csrfToken|key_id|keyId)\b`)
-	disable      = regexp.MustCompile(`no-secrets-in-logs[ -]?disable`)
-	redactor     = regexp.MustCompile(`\b(?:redact|maskSecret|sanitize)\(`)
+	logCall     = regexp.MustCompile(`\b(?:logger|log|slog|cfg\.Logger|r\.cfg\.Logger|s\.logger)\.(?:Info|Warn|Error|Debug|Print(?:f|ln)?|Errorf|Fatalf)\(`)
+	secretToken = regexp.MustCompile(`\b(?:[A-Za-z0-9_]*?(?:secret|password|passwd)[A-Za-z0-9_]*|stream[_-]?key|api[_-]?key|private[_-]?key|signing[_-]?key|access[_-]?token|bearer[_-]?token|auth[_-]?token)\b`)
+	safeToken   = regexp.MustCompile(`\b(?:key_hash|keyHash|api_key_hash|apiKeyHash|stream_key_hash|streamKeyHash|csrf_token|csrfToken|key_id|keyId)\b`)
+	disable     = regexp.MustCompile(`no-secrets-in-logs[ -]?disable`)
+	redactor    = regexp.MustCompile(`\b(?:redact|maskSecret|sanitize)\(`)
 )
 
 // Run walks the worker module rooted at root and emits ERROR lines for

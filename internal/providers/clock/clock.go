@@ -23,8 +23,8 @@ func System() Clock { return systemClock{} }
 
 type systemClock struct{}
 
-func (systemClock) Now() time.Time             { return time.Now() }
-func (systemClock) Sleep(d time.Duration)      { time.Sleep(d) }
+func (systemClock) Now() time.Time        { return time.Now() }
+func (systemClock) Sleep(d time.Duration) { time.Sleep(d) }
 func (systemClock) NewTimer(d time.Duration) Timer {
 	t := time.NewTimer(d)
 	return realTimer{t: t}
@@ -32,6 +32,6 @@ func (systemClock) NewTimer(d time.Duration) Timer {
 
 type realTimer struct{ t *time.Timer }
 
-func (r realTimer) Chan() <-chan time.Time { return r.t.C }
-func (r realTimer) Stop() bool             { return r.t.Stop() }
+func (r realTimer) Chan() <-chan time.Time     { return r.t.C }
+func (r realTimer) Stop() bool                 { return r.t.Stop() }
 func (r realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }

@@ -18,7 +18,7 @@ type Protocol string
 
 const (
 	ProtocolRTMP Protocol = "rtmp"
-	ProtocolSRT  Protocol = "srt" // backlog
+	ProtocolSRT  Protocol = "srt"  // backlog
 	ProtocolWHIP Protocol = "whip" // backlog (WebRTC)
 )
 

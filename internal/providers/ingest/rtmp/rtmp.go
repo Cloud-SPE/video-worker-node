@@ -152,11 +152,11 @@ type connHandler struct {
 	logger   *slog.Logger
 	remote   string
 
-	mu        sync.Mutex
-	pipeW     *io.PipeWriter
-	pipeR     *io.PipeReader
-	session   *session
-	onEnd     func(string)
+	mu      sync.Mutex
+	pipeW   *io.PipeWriter
+	pipeR   *io.PipeReader
+	session *session
+	onEnd   func(string)
 }
 
 func (h *connHandler) OnPublish(_ *rtmp.StreamContext, _ uint32, cmd *rtmpmsg.NetStreamPublish) error {

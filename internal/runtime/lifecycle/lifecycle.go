@@ -21,15 +21,15 @@ import (
 // v3.0.0: Reporter (capability reporter) field removed — workers do
 // not self-publish under archetype A.
 type Config struct {
-	Mode       types.Mode
-	JobRunner  *jobrunner.Runner
-	ABRRunner  *abrrunner.Runner
-	LiveRunner *liverunner.Runner
-	HTTPListen func(ctx context.Context) error
-	GRPCListen func() error
-	GRPCStop   func()
+	Mode          types.Mode
+	JobRunner     *jobrunner.Runner
+	ABRRunner     *abrrunner.Runner
+	LiveRunner    *liverunner.Runner
+	HTTPListen    func(ctx context.Context) error
+	GRPCListen    func() error
+	GRPCStop      func()
 	MetricsListen func(ctx context.Context) error
-	Logger     *slog.Logger
+	Logger        *slog.Logger
 
 	// ABRPlanFn returns the ABR plan for an in-flight job ID; required
 	// when ABRRunner is wired.
