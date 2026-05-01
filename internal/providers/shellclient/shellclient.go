@@ -68,7 +68,7 @@ type SessionTickResult struct {
 // SessionEndedInput / SessionEndedResult — POST /internal/live/session-ended.
 type SessionEndedInput struct {
 	StreamID     string
-	Reason       string // "graceful" | "insufficient_balance" | "worker_error" | "admin_stop"
+	Reason       string // "graceful" | "insufficient_balance" | "session_worker_failed" | "admin_stop"
 	FinalSeq     uint64
 	FinalSeconds float64
 }

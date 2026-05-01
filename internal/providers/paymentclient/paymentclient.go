@@ -11,20 +11,40 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pmt "github.com/Cloud-SPE/video-worker-node/proto/clients/livepeer/payments/v1"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/paymentbroker"
+	pmt "github.com/Cloud-SPE/video-worker-node/proto/clients/livepeer/payments/v1"
 )
 
 // Client wraps a PayeeDaemon gRPC connection.
 type Client struct {
 	conn *grpc.ClientConn
 	rpc  pmt.PayeeDaemonClient
+}
+
+// ListCapabilitiesResult is the worker-side projection of the daemon's
+// capability catalog, used for startup drift detection.
+type ListCapabilitiesResult struct {
+	Capabilities []Capability
+}
+
+// Capability mirrors the daemon's CapabilityEntry minus proto details.
+type Capability struct {
+	Capability string
+	WorkUnit   string
+	Offerings  []OfferingPrice
+}
+
+// OfferingPrice mirrors the daemon's offering price rows.
+type OfferingPrice struct {
+	ID                  string
+	PricePerWorkUnitWei string
 }
 
 // Open dials a payment-daemon over the given unix socket path.
@@ -52,6 +72,31 @@ func (c *Client) Close() error {
 		return nil
 	}
 	return c.conn.Close()
+}
+
+// ListCapabilities returns the daemon's configured capability catalog for
+// startup drift detection against worker.yaml.
+func (c *Client) ListCapabilities(ctx context.Context) (ListCapabilitiesResult, error) {
+	resp, err := c.rpc.ListCapabilities(ctx, &pmt.ListCapabilitiesRequest{})
+	if err != nil {
+		return ListCapabilitiesResult{}, err
+	}
+	caps := make([]Capability, 0, len(resp.GetCapabilities()))
+	for _, capability := range resp.GetCapabilities() {
+		offerings := make([]OfferingPrice, 0, len(capability.GetOfferings()))
+		for _, offering := range capability.GetOfferings() {
+			offerings = append(offerings, OfferingPrice{
+				ID:                  offering.GetId(),
+				PricePerWorkUnitWei: priceInfoToWeiString(offering.GetPriceInfo()),
+			})
+		}
+		caps = append(caps, Capability{
+			Capability: capability.GetCapability(),
+			WorkUnit:   capability.GetWorkUnit(),
+			Offerings:  offerings,
+		})
+	}
+	return ListCapabilitiesResult{Capabilities: caps}, nil
 }
 
 // ProcessPayment satisfies paymentbroker.Broker.
@@ -103,4 +148,16 @@ func (c *Client) CloseSession(ctx context.Context, sender []byte, workID string)
 		Sender: sender, WorkId: workID,
 	})
 	return err
+}
+
+func priceInfoToWeiString(p *pmt.PriceInfo) string {
+	if p == nil {
+		return "0"
+	}
+	num := big.NewInt(p.GetPricePerUnit())
+	den := big.NewInt(p.GetPixelsPerUnit())
+	if den.Sign() <= 0 {
+		return num.String()
+	}
+	return num.Div(num, den).String()
 }

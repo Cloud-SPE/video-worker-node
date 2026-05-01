@@ -6,15 +6,13 @@
 livepeer-video-worker-node \
   --mode=vod \
   --gpu-vendor=nvidia \
+  --config=/etc/livepeer/worker.yaml \
   --ffmpeg-bin=/usr/local/bin/ffmpeg \
   --presets-file=/etc/livepeer/presets/h264-vod.yaml \
   --store-path=/var/lib/livepeer/transcode-state.db \
-  --http-listen=:8081 \
   --grpc-socket=/var/run/livepeer-video-worker.sock \
   --metrics-listen=:9091 \
-  --payment-socket=/var/run/livepeer-payment-daemon.sock \
-  --registry-socket=/var/run/livepeer-registry-daemon.sock \
-  --public-url=https://transcode.example.com
+  --payment-socket=/var/run/livepeer-payment-daemon.sock
 ```
 
 ## Modes
@@ -31,6 +29,7 @@ livepeer-video-worker-node \
 livepeer-video-worker-node \
   --mode=live \
   --gpu-vendor=nvidia \
+  --config=/etc/livepeer/worker.yaml \
   --presets-file=/etc/livepeer/presets/h264-live.yaml \
   --debit-cadence=5s \
   --stream-runway-seconds=30 \
@@ -38,9 +37,7 @@ livepeer-video-worker-node \
   --stream-pre-credit-seconds=60 \
   --stream-restart-limit=3 \
   --stream-topup-min-interval=5s \
-  --public-url=https://transcode.example.com \
-  --payment-socket=/var/run/livepeer-payment-daemon.sock \
-  --registry-socket=/var/run/livepeer-registry-daemon.sock
+  --payment-socket=/var/run/livepeer-payment-daemon.sock
 ```
 
 Broadcasters connect to `rtmp://transcode.example.com:1935/live/{stream_key}`.
@@ -64,32 +61,38 @@ make docker-build DOCKER_TARGET=runtime-amd    DOCKER_TAG=dev
 
 ## Environment + sockets
 
-The worker expects two unix sockets at the configured paths:
+The worker expects the payment-daemon unix socket at the configured path:
 - `--payment-socket` — `payment-daemon` (receiver mode), co-located on the same host.
-- `--registry-socket` — `service-registry-daemon` (publisher mode), co-located.
 
-Both daemons are sourced from `livepeer-modules` and run as separate
-processes. The worker NEVER speaks chain RPC directly.
+The worker reads shared `worker.yaml` via `--config` for its `worker`
+section, optional top-level `auth_token`, optional top-level
+`worker_eth_address`, and capability `offerings[]`. `payment_daemon:`
+is shared with the co-located receiver daemon, but this worker only
+consumes its own worker-facing fields plus the capability catalog.
+
+`payment-daemon` is sourced from `livepeer-modules` and runs as a
+separate process. The worker NEVER speaks chain RPC directly.
 
 ## Capabilities
 
-The worker advertises capability strings to `service-registry-daemon`.
-Defaults from the worker.yaml (or wired via flags):
+The worker serves canonical capability data via `GET /registry/offerings`
+derived from `worker.yaml`:
 
 ```
-- video.transcode.vod
-- video.transcode.abr
-- video.live.rtmp     (when --mode=live)
+- video:transcode.vod
+- video:transcode.abr
+- video:live.rtmp     (when --mode=live)
 ```
 
-The shell resolves workers by these strings. See
+Orch-coordinator scrapes the worker by these strings and folds the
+result into the operator-confirmed roster. See
 [`../design-docs/worker-discovery.md`](../design-docs/worker-discovery.md).
 
 ## Observability
 
 | Endpoint | Default | Notes |
 |---|---|---|
-| `GET /healthz` | `:8081` | Liveness + mode + active stream count |
+| `GET /health` | `:8081` | Liveness + mode + active stream count |
 | `GET /registry/offerings` | `:8081` | Suite-wide capability advertisement for orch-coordinator scrape |
 | `GET /metrics` | `:9091` (off by default) | Prometheus; prefix `livepeer_videoworker_*` |
 | Operator gRPC | unix socket | `--grpc-socket=/var/run/...` |

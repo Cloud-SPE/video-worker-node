@@ -20,6 +20,26 @@ type fakeServer struct {
 	debitCalls   int
 }
 
+func (s *fakeServer) ListCapabilities(_ context.Context, _ *pmt.ListCapabilitiesRequest) (*pmt.ListCapabilitiesResponse, error) {
+	return &pmt.ListCapabilitiesResponse{
+		Capabilities: []*pmt.CapabilityEntry{
+			{
+				Capability: "video:transcode.vod",
+				WorkUnit:   "video_frame_megapixel",
+				Offerings: []*pmt.OfferingPrice{
+					{
+						Id: "h264-1080p",
+						PriceInfo: &pmt.PriceInfo{
+							PricePerUnit:  1250000,
+							PixelsPerUnit: 1,
+						},
+					},
+				},
+			},
+		},
+	}, nil
+}
+
 func (s *fakeServer) ProcessPayment(_ context.Context, req *pmt.ProcessPaymentRequest) (*pmt.ProcessPaymentResponse, error) {
 	s.processCalls++
 	return &pmt.ProcessPaymentResponse{
@@ -91,6 +111,16 @@ func TestClientHappyPath(t *testing.T) {
 	}
 	if err := c.CloseSession(context.Background(), []byte("s"), "w"); err != nil {
 		t.Fatal(err)
+	}
+	catalog, err := c.ListCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Capabilities) != 1 {
+		t.Fatalf("capabilities=%d", len(catalog.Capabilities))
+	}
+	if catalog.Capabilities[0].Offerings[0].PricePerWorkUnitWei != "1250000" {
+		t.Fatalf("price=%q", catalog.Capabilities[0].Offerings[0].PricePerWorkUnitWei)
 	}
 }
 

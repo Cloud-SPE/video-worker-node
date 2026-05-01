@@ -23,9 +23,9 @@ Someone with GPU capacity who wants to sell **transcode-seconds** (VOD, ABR ladd
 
 ### The shell operator (secondary)
 
-Someone running a video gateway (Cloud-SPE's `livepeer-video-gateway`, or any other HTTP API that fronts these workers) who lists this worker via `service-registry-daemon`. They care about:
+Someone running a video gateway (Cloud-SPE's `livepeer-video-gateway`, or any other HTTP API that fronts these workers) who lists this worker via orch-coordinator scrape of `GET /registry/offerings`. They care about:
 
-- A **predictable HTTP contract** (`/healthz`, `/registry/offerings`, `POST /v1/video/transcode`, `POST /stream/start`, RTMP `:1935`).
+- A **predictable HTTP contract** (`/health`, `/registry/offerings`, `POST /v1/video/transcode`, `POST /stream/start`, RTMP `:1935`).
 - A **truthful `/registry/offerings` response** — what the worker advertises for coordinator/operator consumption is what the worker can deliver.
 - **Clean error modes:** `payment-required`, `capacity-exceeded`, `model-unsupported`, `gpu-busy` are distinguishable.
 - **Reliable webhooks** (HMAC-signed, retried with backoff) so state transitions in the worker can be reflected in the shell's DB without polling.
@@ -44,7 +44,7 @@ End customers never see this worker — they talk to the shell. But they care (i
 - A VOD job submitted via `POST /v1/video/transcode` with a valid payment ticket completes within the source duration's expected encode time on the configured GPU vendor.
 - An ABR job produces a master HLS manifest plus one playlist per rendition, all uploaded to the operator-configured object storage URL.
 - A live broadcaster connecting to `rtmp://host:1935/live/{stream_key}` produces HLS segments visible at the storage URL within ~10s of first frame.
-- The worker advertises its capabilities to `service-registry-daemon` on startup and refreshes per the configured interval; the shell sees them within 5s of refresh.
+- The worker's `GET /registry/offerings` response is a truthful projection of `worker.yaml`, with real offerings, prices, constraints, and no leaked `backend_url`.
 - The worker's metrics endpoint surfaces every encode's status, FPS, and GPU vendor — operators can spot a struggling worker without ssh.
 - A worker restart resumes any in-flight VOD/ABR jobs from BoltDB without re-debiting a customer or losing a partial encode.
 - Replacing `paymentclient` with a different gRPC client is the **only** change needed to talk to a different paid-work scheme. Worker portability is enforced by lint, not by vigilance.
@@ -64,7 +64,7 @@ End customers never see this worker — they talk to the shell. But they care (i
 ## Non-ambitions (worth naming)
 
 - No admin UI. Observability is metrics + logs + the payment-daemon's own RPCs.
-- No automatic backend discovery — but `service-registry-daemon` discovery is exactly the point.
+- No automatic backend discovery beyond the coordinator/operator path.
 - No hot reload. Config changes restart the worker.
 - No multi-language polyglot. Worker is Go; that is the entire toolchain.
 
@@ -72,7 +72,7 @@ End customers never see this worker — they talk to the shell. But they care (i
 
 The reference shell that consumes this worker is Cloud-SPE's video gateway, but **nothing in this repo is shell-specific**. Any HTTP server that:
 
-1. Resolves a worker via `service-registry-daemon`,
+1. Resolves a worker via the coordinator/operator roster path fed by worker `GET /registry/offerings`,
 2. Sends a `livepeer-payment` ticket from a sender-mode `payment-daemon`,
 3. POSTs an OpenAPI-compatible body (or starts an RTMP session via `/stream/start`),
 

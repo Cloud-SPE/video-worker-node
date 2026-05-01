@@ -91,14 +91,14 @@ func newRunnerWithFakes(t *testing.T) (*Runner, *shellclient.Fake, func() *scrip
 		return enc
 	}
 	r, err := New(Config{
-		Repo:           repo,
-		Shell:          shell,
-		EncoderFactory: factory,
-		WorkerURL:      "http://worker:8080",
-		LivePreset:     "h264-live",
-		DebitCadence:   20 * time.Millisecond,
-		RunwaySeconds:  30,
-		GraceSeconds:   1,
+		Repo:             repo,
+		Shell:            shell,
+		EncoderFactory:   factory,
+		WorkerURL:        "http://worker:8080",
+		LivePreset:       "h264-live",
+		DebitCadence:     20 * time.Millisecond,
+		RunwaySeconds:    30,
+		GraceSeconds:     1,
 		PreCreditSeconds: 60,
 		TopupMinInterval: time.Millisecond,
 	})
@@ -277,8 +277,57 @@ func TestSessionEndedCalledOnEncoderError(t *testing.T) {
 	enc.finish(errors.New("boom"))
 	waitFor(t, func() bool { return len(shell.Snapshot().SessionEnded) == 1 }, time.Second, "ended")
 	end := shell.Snapshot().SessionEnded[0]
-	if end.Reason != "worker_error" {
-		t.Errorf("reason=%q want worker_error", end.Reason)
+	if end.Reason != "session_worker_failed" {
+		t.Errorf("reason=%q want session_worker_failed", end.Reason)
+	}
+}
+
+func TestIngestCloseEndsGracefully(t *testing.T) {
+	r, shell, _, _ := newRunnerWithFakes(t)
+	sess := newFakeSession("sk_live_close", "")
+	acc, err := r.Accept(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	acc.OnEnd("close")
+	waitFor(t, func() bool { return len(shell.Snapshot().SessionEnded) == 1 }, time.Second, "ended after close")
+	end := shell.Snapshot().SessionEnded[0]
+	if end.Reason != "graceful" {
+		t.Fatalf("reason=%q want graceful", end.Reason)
+	}
+	if !sess.closed.Load() {
+		t.Fatal("session must be closed on ingest close")
+	}
+}
+
+func TestIngestFailureMapsToSessionWorkerFailed(t *testing.T) {
+	r, shell, _, _ := newRunnerWithFakes(t)
+	sess := newFakeSession("sk_live_transport", "")
+	acc, err := r.Accept(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	acc.OnEnd("transport_error")
+	waitFor(t, func() bool { return len(shell.Snapshot().SessionEnded) == 1 }, time.Second, "ended after ingest failure")
+	end := shell.Snapshot().SessionEnded[0]
+	if end.Reason != "session_worker_failed" {
+		t.Fatalf("reason=%q want session_worker_failed", end.Reason)
+	}
+}
+
+func TestStopMapsToAdminStop(t *testing.T) {
+	r, shell, _, _ := newRunnerWithFakes(t)
+	sess := newFakeSession("sk_live_admin", "")
+	if _, err := r.Accept(context.Background(), sess); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := r.Stop(context.Background(), "live_fake"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitFor(t, func() bool { return len(shell.Snapshot().SessionEnded) == 1 }, time.Second, "ended after stop")
+	end := shell.Snapshot().SessionEnded[0]
+	if end.Reason != "admin_stop" {
+		t.Fatalf("reason=%q want admin_stop", end.Reason)
 	}
 }
 

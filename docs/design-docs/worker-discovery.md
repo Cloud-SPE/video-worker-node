@@ -8,20 +8,17 @@ last-reviewed: 2026-04-26
 
 How the shell finds workers that can handle a given capability.
 
-> **Status**: drafted. Worker side implemented in
-> `internal/service/capabilityreporter/`. Resolver-side implementation is
-> the consuming shell's concern.
+> **Status**: drafted. Worker side is the `GET /registry/offerings`
+> HTTP surface plus shared `worker.yaml` capability catalog. Resolver-
+> side implementation is the consuming shell/coordinator concern.
 
 ## The model
 
-The shell co-locates a `service-registry-daemon` (resolver mode) over a
-local unix socket. Workers (each with their own co-located
-`service-registry-daemon` in publisher mode) advertise their capabilities
-on-chain via the daemon. The shell's resolver gRPC call returns the set of
-workers currently advertising any given capability.
-
-This pattern is borrowed wholesale from `livepeer-modules`. We
-consume the daemons over local gRPC and vendor their proto stubs.
+Workers expose capability fragments on `GET /registry/offerings`.
+Orch-coordinator performs one-shot scrape of known workers, stores the
+results in draft state, and the operator confirms the resulting roster
+before signing/publication. The consuming shell resolves against that
+operator-confirmed roster rather than asking the worker directly.
 
 ## Capability strings
 
@@ -30,20 +27,21 @@ canonical capability set:
 
 | Capability | Status | Meaning |
 |---|---|---|
-| `video.transcode.vod` | MVP | Worker can do VOD transcoding |
-| `video.transcode.abr` | MVP | Worker can do ABR-ladder transcoding |
-| `video.live.rtmp` | MVP | Worker can ingest RTMP and produce live HLS |
-| `video.live.srt` | backlog | Worker can ingest SRT |
-| `video.realtime.whip` | backlog (WebRTC) | Worker (or paired SFU) can accept WHIP |
+| `video:transcode.vod` | MVP | Worker can do VOD transcoding |
+| `video:transcode.abr` | MVP | Worker can do ABR-ladder transcoding |
+| `video:live.rtmp` | MVP | Worker can ingest RTMP and produce live HLS |
+| `video:live.srt` | backlog | Worker can ingest SRT |
+| `video:realtime.whip` | backlog (WebRTC) | Worker (or paired SFU) can accept WHIP |
 
 A worker's `worker.yaml` declares which it advertises; mismatches
-between declared capability and actual support fail preflight on startup.
+between declared capability and actual support should fail startup
+validation or dispatch-time checks.
 
 ## `WorkerResolver` adapter
 
 The engine's `WorkerResolver` interface ([`adapter-contracts.md`](adapter-contracts.md))
-returns a list of `(url, capabilities, gpu)` tuples. The shell's impl wraps
-the gRPC resolver with:
+returns a list of worker candidates. The shell's impl typically wraps
+the coordinator/operator roster with:
 
 - Local cache (5s stale-while-revalidate) to avoid hammering the daemon on
   high-throughput dispatch.
@@ -70,17 +68,17 @@ failure-domain-spreading) is post-MVP.
 ## Bootstrapping a new worker
 
 ```
-1. Operator deploys worker pod/host with worker.yaml advertising capabilities.
+1. Operator deploys worker host with `worker.yaml` advertising capabilities.
 2. Worker starts payment-daemon (receiver mode) co-located.
-3. Worker starts service-registry-daemon (publisher mode) co-located.
-4. Worker calls registry-daemon.Publish({ capabilities, public_url, gpu, ... }).
-5. Registry-daemon publishes the manifest on-chain.
-6. Shell's resolver picks up the new worker on the next cache refresh (≤5s).
+3. Worker serves `GET /registry/offerings`.
+4. Orch-coordinator scrapes the worker and stores the draft capability fragment.
+5. Operator confirms the roster and signs/publishes through secure-orch tooling.
+6. Shell resolver picks up the updated roster on the next refresh.
 ```
 
 ## Capability mismatch handling
 
-If the shell tries to dispatch `video.live.rtmp` and the resolver returns
+If the shell tries to dispatch `video:live.rtmp` and the resolver returns
 zero workers (e.g., all NVIDIA workers down), the dispatcher returns
 `NoWorkersAvailable` and the asset/stream transitions to `errored` with
 a structured error.
@@ -93,5 +91,5 @@ a configurable window, vs failing immediately. MVP fails immediately.
 - [`payment-integration.md`](payment-integration.md) — how dispatch works
   once a worker is selected
 - [`adapter-contracts.md`](adapter-contracts.md) §`WorkerResolver`
-- [livepeer-modules](https://github.com/Cloud-SPE/livepeer-modules)
-  `service-registry-daemon/` — what we consume
+- `livepeer-network-spec-v3.md` / `video-worker-node-spec-v3.md` — the
+  v3 worker discovery and roster flow this doc describes

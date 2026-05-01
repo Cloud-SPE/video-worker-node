@@ -37,7 +37,7 @@ shell is the only intended client.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/healthz` | liveness + mode + active stream count |
+| GET | `/health` | liveness + mode + active stream count |
 | GET | `/registry/offerings` | suite-wide capability advertisement for orch-coordinator scrape; omits internal `backend_url`, may include orch-internal `worker_eth_address` |
 
 ## Auth

@@ -44,8 +44,9 @@ Shell (livepeer-video-gateway)
   ├─ wallet.reserve(callerId, costQuote) → reservation_handle
   │     ↑ (writes to app.reservations + decrements app.balances.reserved_cents)
   │
-  ├─ workerResolver.resolveByCapability('video.transcode.vod')
-  │     ↑ gRPC unix-socket to local service-registry-daemon (resolver)
+  ├─ workerResolver.resolveByCapability('video:transcode.vod')
+  │     ↑ backed by the coordinator/operator roster populated from worker
+  │       GET /registry/offerings scrapes
   │
   ├─ workerClient.callWorker({ workerUrl, path: '/v1/video/transcode', ... })
   │     │

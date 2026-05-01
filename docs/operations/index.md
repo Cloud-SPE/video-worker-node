@@ -12,7 +12,7 @@ Operator runbooks. How to run the daemon, what to watch, what to do when somethi
 
 *(populates in [exec-plan 0001](../exec-plans/active/0001-extract-from-platform.md) Phase 3 — doc lift)*
 
-- `running-the-daemon.md` — config layout (`worker.yaml`), startup sequence, how to pick a GPU build variant, how to wire into `service-registry-daemon`.
+- `running-the-daemon.md` — config layout (`worker.yaml`), startup sequence, how to pick a GPU build variant, and how worker `GET /registry/offerings` fits into the orch-coordinator flow.
 - `troubleshooting.md` *(future)* — common failure modes: GPU mismatch, FFmpeg crash patterns, RTMP refused-connection, payment-daemon socket missing.
 - `metrics-dashboard.md` *(future)* — example Grafana dashboard JSON for the worker's Prometheus output.
 

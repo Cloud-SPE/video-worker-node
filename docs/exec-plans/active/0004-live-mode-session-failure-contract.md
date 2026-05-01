@@ -2,7 +2,7 @@
 id: 0004
 slug: live-mode-session-failure-contract
 title: Live mode session failure contract
-status: drafted
+status: in_progress
 owner: agent
 opened: 2026-05-01
 depends-on: 0003
@@ -27,20 +27,20 @@ and clean up FFmpeg / RTMP resources without attempting migration.
   this repo must emit the agreed contract.
 
 ## Approach
-- [ ] Trace every live encode failure path in `internal/service/liverunner/`
+- [x] Trace every live encode failure path in `internal/service/liverunner/`
       and `internal/providers/ingest/rtmp/` to identify where the
       current code already emits a structured terminal state versus where
       it only logs / tears down implicitly.
-- [ ] Introduce a single worker-side failure code path for live session
+- [x] Introduce a single worker-side failure code path for live session
       encode failures (`session_worker_failed`) and map internal FFmpeg /
       ingest / storage failures onto it without losing operator-useful
       logs.
-- [ ] Ensure teardown is explicit and idempotent: FFmpeg subprocess,
+- [x] Ensure teardown is explicit and idempotent: FFmpeg subprocess,
       ingest session, temp storage, and any ticker/payment loop state
       must be released on failure.
-- [ ] Add tests for at least FFmpeg crash, ingest disconnect, and
+- [x] Add tests for at least FFmpeg crash, ingest disconnect, and
       cleanup-on-close behavior.
-- [ ] Document the live failure semantics in `DESIGN.md` and the
+- [x] Document the live failure semantics in `DESIGN.md` and the
       relevant product/design docs.
 
 ## Decisions log
@@ -52,12 +52,13 @@ different work with a distinct risk profile and should be tracked
 separately even if executed in the same release wave.
 
 ## Open questions
-- Exact outward surface for the structured failure in the current live
-  APIs: whether the authoritative signal is the HTTP session/status path,
-  an internal callback, or both.
 - Whether any existing shell-facing callback/event names should be
   normalized at the same time, or whether this repo should only map to
   the new error code and leave event taxonomy unchanged.
 
 ## Artifacts produced
-- None yet.
+- `internal/service/liverunner/liverunner.go`
+- `internal/service/liverunner/session_test.go`
+- `internal/providers/shellclient/shellclient.go`
+- `docs/design-docs/internal-callback-api.md`
+- `docs/design-docs/live-state-machine.md`

@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cloud-SPE/video-worker-node/internal/config"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
 )
 
 func TestRunHelpFlag(t *testing.T) {
@@ -139,5 +142,78 @@ func TestPlanRegistry(t *testing.T) {
 	r := newPlanRegistry()
 	if _, ok := r.Get("x"); ok {
 		t.Fatal("ghost should be missing")
+	}
+}
+
+func TestVerifyPaymentDaemonCatalogIgnoresOrdering(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Capabilities = []config.RegistryCapability{
+		{
+			Name:     "video:live.rtmp",
+			WorkUnit: "video_frame_megapixel",
+			Offerings: []config.RegistryOffering{
+				{ID: "live-b", PricePerWorkUnitWei: "2"},
+				{ID: "live-a", PricePerWorkUnitWei: "1"},
+			},
+		},
+		{
+			Name:     "video:transcode.vod",
+			WorkUnit: "video_frame_megapixel",
+			Offerings: []config.RegistryOffering{
+				{ID: "vod-z", PricePerWorkUnitWei: "3"},
+			},
+		},
+	}
+	daemon := paymentclient.ListCapabilitiesResult{
+		Capabilities: []paymentclient.Capability{
+			{
+				Capability: "video:transcode.vod",
+				WorkUnit:   "video_frame_megapixel",
+				Offerings: []paymentclient.OfferingPrice{
+					{ID: "vod-z", PricePerWorkUnitWei: "3"},
+				},
+			},
+			{
+				Capability: "video:live.rtmp",
+				WorkUnit:   "video_frame_megapixel",
+				Offerings: []paymentclient.OfferingPrice{
+					{ID: "live-a", PricePerWorkUnitWei: "1"},
+					{ID: "live-b", PricePerWorkUnitWei: "2"},
+				},
+			},
+		},
+	}
+	if err := verifyPaymentDaemonCatalog(cfg, daemon); err != nil {
+		t.Fatalf("verifyPaymentDaemonCatalog: %v", err)
+	}
+}
+
+func TestVerifyPaymentDaemonCatalogDetectsMismatch(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Capabilities = []config.RegistryCapability{
+		{
+			Name:     "video:transcode.vod",
+			WorkUnit: "video_frame_megapixel",
+			Offerings: []config.RegistryOffering{
+				{ID: "h264-1080p", PricePerWorkUnitWei: "1250000"},
+			},
+		},
+	}
+	daemon := paymentclient.ListCapabilitiesResult{
+		Capabilities: []paymentclient.Capability{
+			{
+				Capability: "video:transcode.vod",
+				WorkUnit:   "video_frame_megapixel",
+				Offerings: []paymentclient.OfferingPrice{
+					{ID: "h264-1080p", PricePerWorkUnitWei: "777"},
+				},
+			},
+		},
+	}
+	err := verifyPaymentDaemonCatalog(cfg, daemon)
+	if err == nil || !strings.Contains(err.Error(), "price worker=") {
+		t.Fatalf("err=%v", err)
 	}
 }

@@ -30,14 +30,12 @@ top-level [`DESIGN.md`](../../DESIGN.md) §"Trust boundaries".
 | `9090` | shell | `METRICS_LISTEN=:9090` |
 | `9091` | worker | `--metrics-listen=:9091` |
 | `9092` | payment-daemon | per `livepeer-modules` ports.md |
-| `9091` | service-registry-daemon | per `livepeer-modules` ports.md (different host than worker, no collision) |
 
 ## Local IPC (unix sockets)
 
 | Path | Owner | Notes |
 |---|---|---|
 | `/var/run/livepeer-payment-daemon.sock` | shell host (sender mode) and worker host (receiver mode) | same path, different hosts |
-| `/var/run/livepeer-registry-daemon.sock` | shell host (resolver mode) and worker host (publisher mode) | same path, different hosts |
 | `/var/run/livepeer-video-worker.sock` | worker | operator gRPC |
 
 ## Reserved for future modules
@@ -51,7 +49,7 @@ Local `infra/compose.yaml`:
 - exposes only what's needed for dev (`8080`, `1935`, `9094`, MinIO console
   `9001`, Postgres `5432` for inspect, Grafana `3000` once landed)
 - metrics endpoints exposed for Prometheus scrape inside the compose network
-- payment + registry sockets shared via named volume
+- payment socket shared via named volume
 
 Production:
 - only `8080` (shell) and `1935` (worker) exposed publicly, behind reverse

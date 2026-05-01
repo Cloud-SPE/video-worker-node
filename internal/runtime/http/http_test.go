@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Cloud-SPE/video-worker-node/internal/config"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/store"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/liverunner"
@@ -47,9 +48,37 @@ func newTestServer(t *testing.T, mode types.Mode) *Server {
 	}
 	srv, err := New(Config{
 		Mode: mode, Dev: true, Repo: repo, Presets: pl, LiveRunner: lr,
-		PublicRTMPURL:          "rtmp://localhost:1935/live",
-		MaxConcurrent:          4,
-		AdvertisedCapabilities: []string{"video.transcode.vod", "video.live.rtmp"},
+		APIVersion:       7,
+		ProtocolVersion:  11,
+		WorkerEthAddress: "0x1234567890abcdef1234567890abcdef12345678",
+		PublicRTMPURL:    "rtmp://localhost:1935/live",
+		MaxConcurrent:    4,
+		RegistryCapabilities: []config.RegistryCapability{
+			{
+				Name:     "video:transcode.vod",
+				WorkUnit: "video_frame_megapixel",
+				Extra:    map[string]any{"vendor": "nvenc"},
+				Offerings: []config.RegistryOffering{
+					{
+						ID:                  "h264-1080p",
+						PricePerWorkUnitWei: "1250000",
+						BackendURL:          "http://127.0.0.1:9000",
+						Constraints:         map[string]any{"preset": "h264-1080p"},
+					},
+				},
+			},
+			{
+				Name:     "video:live.rtmp",
+				WorkUnit: "video_frame_megapixel",
+				Offerings: []config.RegistryOffering{
+					{
+						ID:                  "live-h264",
+						PricePerWorkUnitWei: "2500000",
+						BackendURL:          "http://127.0.0.1:1935",
+					},
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("server: %v", err)
@@ -60,7 +89,7 @@ func newTestServer(t *testing.T, mode types.Mode) *Server {
 func TestHandleHealth(t *testing.T) {
 	srv := newTestServer(t, types.ModeLive)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/healthz", nil)
+	req := httptest.NewRequest("GET", "/health", nil)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -72,24 +101,53 @@ func TestHandleHealth(t *testing.T) {
 	if body["status"] != "ok" {
 		t.Fatalf("status: %v", body["status"])
 	}
+	if body["api_version"] != float64(7) {
+		t.Fatalf("api_version: %v", body["api_version"])
+	}
+	if body["protocol_version"] != float64(11) {
+		t.Fatalf("protocol_version: %v", body["protocol_version"])
+	}
 }
 
-func TestHandleCapabilities(t *testing.T) {
+func TestHandleRegistryOfferings(t *testing.T) {
 	srv := newTestServer(t, types.ModeLive)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/capabilities", nil)
+	req := httptest.NewRequest("GET", "/registry/offerings", nil)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d", rec.Code)
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var body map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if body["public_rtmp"] != "rtmp://localhost:1935/live" {
-		t.Fatalf("public_rtmp: %v", body["public_rtmp"])
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["worker_eth_address"] != "0x1234567890abcdef1234567890abcdef12345678" {
+		t.Fatalf("worker_eth_address: %v", body["worker_eth_address"])
 	}
 	caps, ok := body["capabilities"].([]any)
 	if !ok || len(caps) != 2 {
 		t.Fatalf("capabilities: %v", body["capabilities"])
+	}
+	first, ok := caps[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first capability: %T", caps[0])
+	}
+	if first["name"] != "video:transcode.vod" {
+		t.Fatalf("name: %v", first["name"])
+	}
+	if _, hasBackendURL := first["backend_url"]; hasBackendURL {
+		t.Fatal("capability should not expose backend_url")
+	}
+	offerings, ok := first["offerings"].([]any)
+	if !ok || len(offerings) != 1 {
+		t.Fatalf("offerings: %v", first["offerings"])
+	}
+	offering, ok := offerings[0].(map[string]any)
+	if !ok {
+		t.Fatalf("offering: %T", offerings[0])
+	}
+	if _, hasBackendURL := offering["backend_url"]; hasBackendURL {
+		t.Fatal("offering should not expose backend_url")
 	}
 }
 
@@ -150,17 +208,17 @@ func TestHandleStreamStartWrongMode(t *testing.T) {
 	}
 }
 
-func TestAuthTokenMiddleware(t *testing.T) {
+func TestRegistryOfferingsAuthToken(t *testing.T) {
 	srv := newTestServer(t, types.ModeLive)
-	srv.authToken = "secret"
+	srv.offeringsAuthToken = "secret"
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/healthz", nil)
+	req := httptest.NewRequest("GET", "/registry/offerings", nil)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d", rec.Code)
 	}
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/healthz", nil)
+	req = httptest.NewRequest("GET", "/registry/offerings", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

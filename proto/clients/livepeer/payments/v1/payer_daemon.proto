@@ -11,65 +11,26 @@ syntax = "proto3";
 
 package livepeer.payments.v1;
 
-option go_package = "github.com/Cloud-SPE/livepeer-video-platform/apps/transcode-worker-node/proto/clients/livepeer/payments/v1;paymentsv1";
-
-import "livepeer/payments/v1/types.proto";
-
 service PayerDaemon {
-  // Start a new payment session against a given payee's advertised ticket
-  // parameters. Returns a `work_id` that subsequent `CreatePayment` calls
-  // reference. One session should cover one ongoing work relationship between
-  // this payer and a specific payee (not one per HTTP call — amortize).
-  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
-
-  // Create a payment blob (a `Payment` with one or more tickets) covering a
-  // requested number of work units against an existing session. The returned
-  // bytes are the exact wire-format `Payment` to hand to the payee.
+  // Create a payment blob (a `Payment` carrying one ticket) for a selected
+  // payee identity at an exact face value. The daemon resolves the payee's
+  // worker URL via the local resolver, fetches canonical TicketParams from
+  // the payee-side ticket-params endpoint, then signs a wire-format Payment.
   rpc CreatePayment(CreatePaymentRequest) returns (CreatePaymentResponse);
-
-  // Close a session and free its nonce state.
-  rpc CloseSession(PayerDaemonCloseSessionRequest) returns (PayerDaemonCloseSessionResponse);
 
   // Inspect the payer's current TicketBroker deposit/reserve state. Read-only;
   // the daemon does not fund escrow.
   rpc GetDepositInfo(GetDepositInfoRequest) returns (GetDepositInfoResponse);
 }
 
-message StartSessionRequest {
-  // Ticket parameters as returned by the payee's `GetQuote`.
-  TicketParams ticket_params = 1;
-
-  // Optional caller-chosen label used only in the daemon's audit log.
-  string label = 2;
-
-  // Price the payee committed to when issuing `ticket_params`. The daemon
-  // stores this price on the session and:
-  //   1. Embeds it in every Payment as `expected_price` so the payee's
-  //      `recipientRand` HMAC inputs match what they used at quote time.
-  //      Without it, the payee re-derives `recipientRand` against price=0
-  //      and the recipient_rand_hash check fails — see receiver.go's
-  //      `computeRecipientRand`.
-  //   2. Sizes ticket batches against `work_units × price`.
-  //
-  // REQUIRED for any session that will produce non-free tickets. Free /
-  // bootstrap sessions may pass `{ price_per_unit_wei: "0", pixels_per_unit: "1" }`.
-  PriceInfo price_info = 3;
-}
-
-message StartSessionResponse {
-  // Opaque session identifier. Include in subsequent `CreatePayment` /
-  // `CloseSession` calls for this relationship.
-  string work_id = 1;
-}
-
 message CreatePaymentRequest {
-  // Session previously returned by `StartSession`.
-  string work_id = 1;
+  // Exact face value to mint into the ticket, in wei, big-endian bytes.
+  bytes face_value = 1;
 
-  // Number of work units the payment should cover. The daemon consults the
-  // session's PriceInfo and produces tickets whose cumulative expected value
-  // >= `work_units × price`.
-  int64 work_units = 2;
+  // Recipient orchestrator identity (the on-chain payee address), 20 raw
+  // bytes. The daemon resolves a worker URL for this address via the local
+  // service-registry-daemon resolver.
+  bytes recipient = 2;
 }
 
 message CreatePaymentResponse {
@@ -84,12 +45,6 @@ message CreatePaymentResponse {
   // payment, in wei, big-endian bytes.
   bytes expected_value = 3;
 }
-
-message PayerDaemonCloseSessionRequest {
-  string work_id = 1;
-}
-
-message PayerDaemonCloseSessionResponse {}
 
 message GetDepositInfoRequest {}
 

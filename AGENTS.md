@@ -1,6 +1,6 @@
 # AGENTS.md — video-worker-node
 
-This repository hosts `livepeer-video-worker-node`: the Go daemon that performs FFmpeg-subprocess transcoding (VOD / ABR / Live HLS) on a host with GPU capacity. It validates payments via a sidecar `livepeer-payment-daemon` (receiver mode) and publishes capabilities via a sidecar `livepeer-service-registry-daemon` — both consumed as published container images from `livepeer-modules`, never as source dependencies. Workload-only: no `chain-commons`, no Stripe, no shell concerns.
+This repository hosts `livepeer-video-worker-node`: the Go daemon that performs FFmpeg-subprocess transcoding (VOD / ABR / Live HLS) on a host with GPU capacity. It validates payments via a sidecar `livepeer-payment-daemon` (receiver mode) and exposes `GET /registry/offerings` for orch-coordinator scrape. `payment-daemon` is consumed as a published container image from `livepeer-modules`, never as a source dependency. Workload-only: no `chain-commons`, no Stripe, no shell concerns.
 
 **Humans steer. Agents execute. Scaffolding is the artifact.**
 
@@ -10,7 +10,7 @@ This repository hosts `livepeer-video-worker-node`: the Go daemon that performs 
 - Product mental model: [PRODUCT_SENSE.md](PRODUCT_SENSE.md)
 - How to plan work: [PLANS.md](PLANS.md)
 - Harness philosophy: [docs/references/openai-harness.pdf](docs/references/openai-harness.pdf)
-- Active extraction plan: [docs/exec-plans/active/0001-extract-from-platform.md](docs/exec-plans/active/0001-extract-from-platform.md)
+- Active v3 alignment plan: [docs/exec-plans/active/0003-v3-0-1-worker-contract-alignment.md](docs/exec-plans/active/0003-v3-0-1-worker-contract-alignment.md)
 
 ## Knowledge base layout
 
@@ -35,7 +35,7 @@ types → config → repo → service → runtime
               providers (cross-cutting; single hop)
 ```
 
-Cross-cutting concerns (FFmpeg subprocess, GPU probe, RTMP ingest, HLS writer, storage upload, payment-daemon gRPC, service-registry-daemon gRPC, webhooks, metrics, logger, clock, store) enter through a single layer: `internal/providers/`. Nothing in `service/` may import `os/exec`, a logging library, an HTTP client, etc. directly — only through a `providers/` interface.
+Cross-cutting concerns (FFmpeg subprocess, GPU probe, RTMP ingest, HLS writer, storage upload, payment-daemon gRPC, webhooks, metrics, logger, clock, store) enter through a single layer: `internal/providers/`. Nothing in `service/` may import `os/exec`, a logging library, an HTTP client, etc. directly — only through a `providers/` interface.
 
 Lints enforce this in CI. See `docs/design-docs/architecture.md` (lifts in Phase 3).
 
@@ -101,6 +101,6 @@ Anticipated targets, mirroring the source module:
 
 | Repo / image | Role |
 |---|---|
-| [`livepeer-modules`](https://github.com/Cloud-SPE/livepeer-modules) | Source of `payment-daemon` + `service-registry-daemon` Docker images. NEVER modified or imported as source. Proto stubs are vendored under `proto/livepeer/` and regenerated via `make proto`. |
+| [`livepeer-modules`](https://github.com/Cloud-SPE/livepeer-modules) | Source of the receiver-mode `payment-daemon` Docker image and the canonical payments proto contract. NEVER modified or imported as source. Proto stubs are vendored under `proto/livepeer/` and regenerated via `make proto`. |
 | Sister: [`openai-worker-node`](https://github.com/Cloud-SPE/openai-worker-node) | Same scaffolding pattern, AI/inference workload. Reference for Go conventions and the harness shape. |
 | Consuming shell | Any video gateway that speaks the bridge protocol (HTTP `POST /v1/video/transcode` + `livepeer-payment` ticket header, RTMP ingest at `:1935`). The reference shell is Cloud-SPE's video gateway; nothing in this repo is shell-specific. |

@@ -45,6 +45,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	dev := fs.Bool("dev", false, "use FakeFFmpeg + fake clients (no real chain / GPU detection)")
 	logLevel := fs.String("log-level", "info", "log level: error|warn|info|debug")
 	logFormat := fs.String("log-format", "text", "log format: text|json")
+	configPath := fs.String("config", "", "path to shared worker.yaml config")
 
 	gpuVendor := fs.String("gpu-vendor", "auto", "auto|nvidia|intel|amd")
 	ffmpegBin := fs.String("ffmpeg-bin", "/usr/local/bin/ffmpeg", "path to ffmpeg binary")
@@ -123,6 +124,24 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	cfg.LiveStoragePrefix = *liveStoragePrefix
 	cfg.AuthToken = *authToken
 
+	if *configPath != "" {
+		sharedCfg, err := config.LoadSharedWorker(*configPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "shared config: %v\n", err)
+			return 2
+		}
+		cfg.ProtocolVersion = sharedCfg.ProtocolVersion
+		cfg.APIVersion = sharedCfg.APIVersion
+		cfg.WorkerEthAddress = sharedCfg.WorkerEthAddress
+		cfg.AuthToken = sharedCfg.AuthToken
+		cfg.HTTPListen = sharedCfg.Worker.HTTPListen
+		cfg.PaymentSocket = sharedCfg.Worker.PaymentDaemonSocket
+		cfg.Capabilities = make([]config.RegistryCapability, 0, len(sharedCfg.Capabilities))
+		for _, capability := range sharedCfg.Capabilities {
+			cfg.Capabilities = append(cfg.Capabilities, capability.Clone())
+		}
+	}
+
 	if cfg.Dev {
 		log.Warn("DEV MODE — using FakeFFmpeg, FakeGPU, fake payment broker; no real subprocesses or chain calls")
 	}
@@ -193,18 +212,28 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "payment client: %v\n", err)
 			return 1
 		}
+		verifyCtx, cancelVerify := context.WithTimeout(ctx, 5*time.Second)
+		daemonCatalog, err := pmtClient.ListCapabilities(verifyCtx)
+		cancelVerify()
+		if err != nil {
+			fmt.Fprintf(stderr, "payment client ListCapabilities: %v\n", err)
+			return 1
+		}
+		if err := verifyPaymentDaemonCatalog(cfg, daemonCatalog); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return 1
+		}
 		paymentBroker = pmtClient
 		defer pmtClient.Close()
 	} else {
 		paymentBroker = paymentbroker.NewFake()
 	}
 
-	// v3.0.0 (suite plan 0003 §Decision 1): worker self-publishing is
-	// dead. Workers are registry-invisible. The orch-coordinator scrapes
-	// /registry/offerings (not implemented in this repo yet — see
-	// follow-up local plan §Decision 5) and the secure-orch console
-	// signs the manifest. capabilityreporter + registryclient packages
-	// removed; --registry-socket / --registry-refresh flags removed.
+	// v3.0.1: worker self-publishing is dead. Workers are
+	// registry-invisible. The orch-coordinator scrapes
+	// /registry/offerings and the secure-orch console signs the
+	// manifest. capabilityreporter + registryclient packages removed;
+	// --registry-socket / --registry-refresh flags removed.
 
 	// Build runners by mode.
 	abrPlans := newPlanRegistry()
@@ -286,16 +315,16 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		liveR, err = liverunner.New(liverunner.Config{
 			Repo: repo, Webhook: wh, Payment: paymentBroker, Presets: pl,
 			GPU: pre.GPU, Logger: log,
-			Shell: shellCl,
-			WorkerURL: cfg.PublicURL,
-			LivePreset: cfg.LivePreset,
-			StoragePrefix: cfg.LiveStoragePrefix,
+			Shell:                shellCl,
+			WorkerURL:            cfg.PublicURL,
+			LivePreset:           cfg.LivePreset,
+			StoragePrefix:        cfg.LiveStoragePrefix,
 			MaxConcurrentStreams: cfg.IngestRTMPMaxConcurrent,
-			EncoderFactory: encFactory,
-			LocalDirRoot: liveLocalDirRoot,
-			Sink: liveSink,
-			Ladder: ladder,
-			DebitCadence: cfg.DebitCadence, RunwaySeconds: cfg.StreamRunwaySeconds,
+			EncoderFactory:       encFactory,
+			LocalDirRoot:         liveLocalDirRoot,
+			Sink:                 liveSink,
+			Ladder:               ladder,
+			DebitCadence:         cfg.DebitCadence, RunwaySeconds: cfg.StreamRunwaySeconds,
 			GraceSeconds: cfg.StreamGraceSeconds, PreCreditSeconds: cfg.StreamPreCreditSeconds,
 			DebitRetryBackoff: cfg.StreamDebitRetryBackoff, RestartLimit: cfg.StreamRestartLimit,
 			TopupMinInterval: cfg.StreamTopupMinInterval,
@@ -311,8 +340,11 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		Mode: cfg.Mode, Dev: cfg.Dev, Repo: repo,
 		JobRunner: jobR, ABRRunner: abrR, LiveRunner: liveR,
 		Payment: paymentBroker, Presets: pl,
-		Prober: probe.NewSystem(),
-		AuthToken: cfg.AuthToken, Logger: log,
+		Prober:     probe.NewSystem(),
+		APIVersion: cfg.APIVersion, ProtocolVersion: cfg.ProtocolVersion,
+		WorkerEthAddress:     cfg.WorkerEthAddress,
+		RegistryCapabilities: cfg.Capabilities,
+		AuthToken:            cfg.AuthToken, Logger: log,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "http: %v\n", err)

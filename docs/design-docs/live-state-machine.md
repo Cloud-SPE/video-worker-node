@@ -69,6 +69,7 @@ what callback fires.
 | `active` → `reconnecting` | tick miss / RTMP drop ≤ `reconnect_window_seconds` | worker | fires `video.live_stream.reconnecting` |
 | `active` / `reconnecting` → `errored` | worker silent > `staleAfterSec` (90s) | shell sweeper | fires `video.live_stream.errored` |
 | `active` / `reconnecting` → `errored` | grace expired with `topup_failed` | worker (`/session-ended` reason=`insufficient_balance`) | fires `video.live_stream.ended` (reason captured) |
+| `active` / `reconnecting` → `errored` | encoder crash / ingest failure on worker | worker (`/session-ended` reason=`session_worker_failed`) | fires `video.live_stream.ended` (reason captured) |
 | `active` / `reconnecting` → `ended` | broadcaster graceful disconnect, `recording_enabled=false` | worker (`/session-ended` reason=`graceful`) | fires `video.live_stream.ended` |
 | `active` / `reconnecting` → `recording_processing` | broadcaster graceful disconnect, `recording_enabled=true` | worker (`/session-ended`) | fires `video.live_stream.ended` |
 | `recording_processing` → `recording_ready` | worker calls `/internal/live/recording-finalized` | worker | fires `video.live_stream.recording_ready` + `video.asset.ready` |

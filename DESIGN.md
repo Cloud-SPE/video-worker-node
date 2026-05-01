@@ -6,7 +6,7 @@
 
 `livepeer-video-worker-node` is the payee-side video adapter in the Livepeer BYOC payment architecture. It accepts transcode requests over HTTP (or persistent RTMP ingest for live mode), validates the attached payment via a co-located `livepeer-payment-daemon` (receiver mode), spawns FFmpeg as a subprocess, writes HLS output to S3-compatible storage, and reports completion via signed webhooks back to whichever shell dispatched the work.
 
-There is no transcoding network, no orchestrator pool, no on-chain interaction in this process. The worker is discovered by a shell via `livepeer-service-registry-daemon` (publisher mode) and is known-to-be-paid-for only through the `livepeer-payment` HTTP header.
+There is no transcoding network, no orchestrator pool, no on-chain interaction in this process. The worker exposes `GET /registry/offerings` for orch-coordinator scrape and is known-to-be-paid-for only through the `livepeer-payment` HTTP header.
 
 The worker is **workload-only**: portable across payment systems, agnostic to which shell consumes it, with zero customer-facing concepts (API keys, projects, billing, customer webhooks all live in the shell).
 
@@ -22,21 +22,21 @@ The worker is **workload-only**: portable across payment systems, agnostic to wh
 └────────┬────────┘   callbacks     │  │ Prometheus /metrics     :9091  │  │
          │                          │  └────────┬─────────────┬─────────┘  │
          │ resolve(capability)      │     gRPC  │             │            │
-         │ via service-registry     │   (unix)  │             │ subprocess │
+         │ via coordinator roster   │   (unix)  │             │ subprocess │
          ▼                          │           ▼             ▼            │
 ┌─────────────────┐                 │  ┌────────────────┐  ┌──────────┐    │
-│  service-       │                 │  │ payment-daemon │  │ ffmpeg / │    │
-│  registry-      │                 │  │ (receiver)     │  │ ffprobe  │    │
-│  daemon         │                 │  │                │  │          │    │
+│  orch-          │                 │  │ payment-daemon │  │ ffmpeg / │    │
+│  coordinator    │                 │  │ (receiver)     │  │ ffprobe  │    │
+│  + signed roster│                 │  │                │  │          │    │
 └─────────────────┘                 │  └────────────────┘  └────┬─────┘    │
-                                    │           ▲               │          │
-                                    │           │               │ HLS      │
-                                    │           │ publish caps  ▼ segments │
-                                    │  ┌─────────────────┐ ┌──────────┐    │
-                                    │  │ service-        │ │ S3-      │    │
-                                    │  │ registry-daemon │ │ compat.  │    │
-                                    │  │ (publisher)     │ │ storage  │    │
-                                    │  └─────────────────┘ └──────────┘    │
+                                    │                           │          │
+                                    │                           │ HLS      │
+                                    │     GET /registry/offerings▼ segments │
+                                    │                         ┌──────────┐  │
+                                    │                         │ S3-      │  │
+                                    │                         │ compat.  │  │
+                                    │                         │ storage  │  │
+                                    │                         └──────────┘  │
                                     └──────────────────────────────────────┘
 ```
 
@@ -60,9 +60,7 @@ Per the harness convention, code under `internal/` flows forward only:
    │  │ http │ grpc │    │               │  │ jobrunner   VOD │ │
    │  └──────┴──────┘    │               │  │ abrrunner   ABR │ │
    │  metrics, lifecycle │               │  │ liverunner Live │ │
-   └──────────┬──────────┘               │  │ capability-     │ │
-              │                          │  │   reporter      │ │
-              │                          │  │ preflight       │ │
+   └──────────┬──────────┘               │  │ preflight       │ │
               │                          │  │ paymentbroker   │ │
               │                          │  │ presetloader    │ │
               │                          │  │ livecdn         │ │
@@ -81,7 +79,6 @@ Per the harness convention, code under `internal/` flows forward only:
    │ webhooks (HMAC)     │ store (BoltDB / Memory)            │
    │ hls (master.m3u8)   │ ingest/rtmp (go-rtmp; no cgo)      │
    │ paymentclient   ─── gRPC unix ───▶ payment-daemon        │
-   │ registryclient  ─── gRPC unix ───▶ service-registry-daemon│
    │ logger, metrics, clock, thumbnails, filters, progress    │
    └────────────────────────────┬─────────────────────────────┘
                                 ▼
@@ -153,17 +150,14 @@ Live mode follows the **streaming-session pattern**: one `ProcessPayment` per se
 
 Sources live in `proto/livepeer/payments/v1/`; generated Go in `proto/gen/go/...`. The `.proto` files are wire-compatible copies of the daemon's; regenerate with `make proto`. This repo consumes the `PayeeDaemonClient` — it does not implement the service.
 
-### Service-registry-daemon gRPC
+### Registry surface
 
-**v3.0.0:** workers are registry-invisible under archetype A. The
-`capabilityreporter` + `registryclient` packages were removed in the
-v3.0.0 cut. The worker now exposes a uniform `/registry/offerings` HTTP
-endpoint that the orch-coordinator scrapes (per livepeer-modules-project's
-`docs/design-docs/worker-offerings-endpoint.md`). Operator-curated
-roster + secure-orch console signing replaces the old worker-self-
-publishing flow. Vendored proto sources at `proto/livepeer/registry/v1/`
-are kept for the `/registry/offerings` body shape contract; no gRPC
-calls go out from this binary.
+Workers are registry-invisible under archetype A. The worker exposes a
+uniform `/registry/offerings` HTTP endpoint that orch-coordinator
+scrapes. Operator-curated roster + secure-orch console signing replaces
+the old worker-self-publishing flow. Vendored proto sources at
+`proto/livepeer/registry/v1/` remain as adjacent contract material; no
+registry gRPC calls go out from this binary.
 
 ### Bridge HTTP contract
 
@@ -193,7 +187,6 @@ HMAC-SHA256 signed via `X-Video-Signature: sha256=<hex>`, delivered with exponen
 | gRPC operator socket | unix only | Filesystem permissions on the socket file |
 | Prometheus `/metrics` `:9091` | TCP, off by default | Unauthenticated; reverse-proxy for auth |
 | Outbound to `payment-daemon` | unix socket | Local trust |
-| Outbound to `service-registry-daemon` | unix socket | Local trust |
 | Outbound webhook callbacks | TCP | HMAC-SHA256 body signature (`X-Video-Signature`) |
 | Outbound to object storage | TCP | Pre-signed URLs from the shell, scoped per job |
 

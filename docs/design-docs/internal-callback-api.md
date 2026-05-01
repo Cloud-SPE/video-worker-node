@@ -88,7 +88,7 @@ reservation with the final usage report, transitions the row to
 fires `video.live_stream.ended`.
 
 ```
-Request:  { stream_id: string, reason: 'graceful' | 'insufficient_balance' | 'worker_error' | 'admin_stop',
+Request:  { stream_id: string, reason: 'graceful' | 'insufficient_balance' | 'session_worker_failed' | 'admin_stop',
             final_seq: int, final_seconds: float }
 Response: { ok: true, recording_processing: bool }
 ```

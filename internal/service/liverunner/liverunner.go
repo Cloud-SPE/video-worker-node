@@ -147,6 +147,47 @@ type streamCtl struct {
 	encoder Encoder
 	mirror  *livecdn.Mirror
 	done    chan struct{}
+	mu      sync.Mutex
+	reason  string
+}
+
+const (
+	sessionEndReasonGraceful            = "graceful"
+	sessionEndReasonInsufficientBalance = "insufficient_balance"
+	sessionEndReasonWorkerFailed        = "session_worker_failed"
+	sessionEndReasonAdminStop           = "admin_stop"
+)
+
+func (s *streamCtl) setReason(reason string) {
+	if reason == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if terminationReasonPriority(reason) >= terminationReasonPriority(s.reason) {
+		s.reason = reason
+	}
+}
+
+func (s *streamCtl) getReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reason
+}
+
+func terminationReasonPriority(reason string) int {
+	switch reason {
+	case sessionEndReasonGraceful:
+		return 1
+	case sessionEndReasonAdminStop:
+		return 2
+	case sessionEndReasonInsufficientBalance:
+		return 3
+	case sessionEndReasonWorkerFailed:
+		return 4
+	default:
+		return 0
+	}
 }
 
 // New constructs the runner with defaulted streaming-session knobs.
@@ -279,7 +320,10 @@ func (r *Runner) Accept(ctx context.Context, sess ingest.IngestSession) (ingest.
 		}
 	}
 
-	ctl := &streamCtl{stream: stream, cancel: cancel, encoder: enc, mirror: mirror, done: make(chan struct{})}
+	ctl := &streamCtl{
+		stream: stream, cancel: cancel, encoder: enc, mirror: mirror, done: make(chan struct{}),
+		reason: sessionEndReasonGraceful,
+	}
 
 	r.mu.Lock()
 	r.streams[validate.StreamID] = ctl
@@ -297,6 +341,11 @@ func (r *Runner) Accept(ctx context.Context, sess ingest.IngestSession) (ingest.
 		OnEnd: func(reason string) {
 			// Provider says the underlying connection is gone. Cancel
 			// the per-stream goroutine; it owns the close path.
+			if reason == "close" {
+				ctl.setReason(sessionEndReasonGraceful)
+			} else {
+				ctl.setReason(sessionEndReasonWorkerFailed)
+			}
 			r.cfg.Logger.Info("liverunner.ingest_ended",
 				"stream_id", validate.StreamID, "reason", reason)
 			cancel()
@@ -350,11 +399,11 @@ func (r *Runner) runSession(
 	defer ticker.Stop()
 
 	var (
-		lastDebited     float64
-		seq             uint64
-		graceDeadline   time.Time // zero = not in grace
-		lastTopupAt     time.Time
-		closeReason     = "graceful"
+		lastDebited   float64
+		seq           uint64
+		graceDeadline time.Time // zero = not in grace
+		lastTopupAt   time.Time
+		closeReason   = sessionEndReasonGraceful
 	)
 
 	if r.cfg.Repo != nil {
@@ -417,7 +466,7 @@ func (r *Runner) runSession(
 				graceDeadline = r.cfg.NowFn().Add(time.Duration(r.cfg.GraceSeconds) * time.Second)
 			}
 			if r.cfg.NowFn().After(graceDeadline) {
-				return true, "insufficient_balance"
+				return true, sessionEndReasonInsufficientBalance
 			}
 		} else {
 			// Balance recovered (e.g., topup succeeded). Clear grace.
@@ -431,13 +480,22 @@ func (r *Runner) runSession(
 	for {
 		select {
 		case <-ctx.Done():
-			closeReason = "worker_error"
+			if reason := ctl.getReason(); reason != "" {
+				closeReason = reason
+			} else {
+				closeReason = sessionEndReasonWorkerFailed
+			}
 			goto end
 		case err := <-encErr:
 			if errors.Is(err, ErrEncoderExited) || errors.Is(err, context.Canceled) {
-				closeReason = "graceful"
+				if reason := ctl.getReason(); reason != "" {
+					closeReason = reason
+				} else {
+					closeReason = sessionEndReasonGraceful
+				}
 			} else {
-				closeReason = "worker_error"
+				closeReason = sessionEndReasonWorkerFailed
+				ctl.setReason(closeReason)
 				r.cfg.Logger.Warn("liverunner.encoder_failed",
 					"stream_id", v.StreamID, "err", err)
 			}
@@ -480,9 +538,9 @@ end:
 
 	// Persist terminal phase.
 	terminalPhase := types.StreamPhaseClosed
-	if closeReason == "insufficient_balance" {
+	if closeReason == sessionEndReasonInsufficientBalance {
 		terminalPhase = types.StreamPhaseBalanceExhausted
-	} else if closeReason == "worker_error" {
+	} else if closeReason == sessionEndReasonWorkerFailed {
 		terminalPhase = types.StreamPhaseEncoderFailed
 	}
 	if r.cfg.Repo != nil {
@@ -572,6 +630,7 @@ func (r *Runner) Stop(_ context.Context, workID string) error {
 	}
 	r.mu.Unlock()
 
+	ctl.setReason(sessionEndReasonAdminStop)
 	ctl.cancel()
 	if ctl.done != nil {
 		<-ctl.done
@@ -611,6 +670,7 @@ func (r *Runner) Shutdown(_ context.Context) {
 	r.mu.Lock()
 	dones := make([]chan struct{}, 0, len(r.streams))
 	for id, ctl := range r.streams {
+		ctl.setReason(sessionEndReasonAdminStop)
 		ctl.cancel()
 		if ctl.done == nil {
 			delete(r.streams, id)

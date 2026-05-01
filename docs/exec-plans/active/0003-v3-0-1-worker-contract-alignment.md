@@ -2,7 +2,7 @@
 id: 0003
 slug: v3-0-1-worker-contract-alignment
 title: v3.0.1 worker contract alignment
-status: drafted
+status: in_progress
 owner: agent
 opened: 2026-05-01
 depends-on: 0001
@@ -55,6 +55,13 @@ Acceptance criteria:
   strings fail closed at parse time.
 - Generated payment proto matches the current modules-project source.
 
+Status:
+- Completed 2026-05-01. Shared `worker.yaml` parser landed in
+  `internal/config/parse.go`; `--config` startup path is wired in
+  `cmd/livepeer-video-worker-node/run.go`; vendored
+  `proto/clients/livepeer/payments/v1/*` now matches the local
+  `livepeer-modules-project` v3.0.1 payments contract.
+
 ### Phase B — Public unpaid HTTP surface
 
 Deliverables:
@@ -75,6 +82,12 @@ Acceptance criteria:
 - Unit tests cover happy-path projection, bearer auth, omitted
   `worker_eth_address`, and `backend_url` stripping.
 
+Status:
+- Completed 2026-05-01. Main worker HTTP now serves `GET /health`,
+  projects real `GET /registry/offerings` data from config, strips
+  `backend_url`, uses shared `auth_token`, and no longer serves
+  `GET /capabilities`.
+
 ### Phase C — Runtime integration + startup consistency
 
 Deliverables:
@@ -91,6 +104,12 @@ Acceptance criteria:
 - Any worker/daemon catalog drift fails closed with a clear startup
   error.
 - Dev-mode and non-dev startup tests cover the shared config path.
+
+Status:
+- Completed 2026-05-01. Worker boot now uses shared YAML for
+  capability/auth data and unpaid HTTP output, and startup fails closed
+  if the payment-daemon catalog drifts on capability, work unit,
+  offering id, or price.
 
 ### Phase D — Deploy/docs/examples sweep
 
@@ -111,6 +130,13 @@ Acceptance criteria:
   strings.
 - `make test` and `make doc-lint` pass.
 
+Status:
+- In progress. Core operator-facing docs and examples have been updated
+  to the shared `worker.yaml` + `/registry/offerings` model, including
+  compose files and `AGENTS.md`. Remaining cleanup is limited to deeper
+  historical material and optional status pruning outside the active
+  operator path.
+
 ## Decisions log
 
 ### 2026-05-01 — Canonical video capability strings are standardized
@@ -128,13 +154,31 @@ that shape keeps the sibling workers consistent and reduces cross-repo
 drift.
 
 ## Open questions
-- Exact worker ↔ payment-daemon startup consistency scope after the
-  proto refresh: capability string + work unit + offering id + price are
-  clearly comparable; `constraints` / `extra` are worker-only and likely
-  should not be part of the daemon comparison.
 - Whether `/health` should include additional operator-triage fields
   beyond the spec minimum (`mode`, version, uptime, inflight). The spec
   permits extensions, but the shape should stay stable once chosen.
 
 ## Artifacts produced
-- None yet.
+- Shared config parser and tests:
+  - `internal/config/config.go`
+  - `internal/config/parse.go`
+  - `internal/config/config_test.go`
+- Public unpaid HTTP v3 surface:
+  - `internal/runtime/http/http.go`
+  - `internal/runtime/http/http_test.go`
+- Startup wiring:
+  - `cmd/livepeer-video-worker-node/run.go`
+  - `cmd/livepeer-video-worker-node/verify.go`
+  - `internal/providers/paymentclient/paymentclient.go`
+  - `internal/providers/paymentclient/paymentclient_test.go`
+  - `cmd/livepeer-video-worker-node/run_test.go`
+- Vendored v3.0.1 payment contract refresh:
+  - `proto/clients/livepeer/payments/v1/*`
+- Core operator/doc sweep:
+  - `README.md`
+  - `DESIGN.md`
+  - `PRODUCT_SENSE.md`
+  - `docs/operations/*`
+  - `docs/design-docs/worker-discovery.md`
+  - `docs/design-docs/payment-integration.md`
+  - `docs/conventions/ports.md`

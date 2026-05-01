@@ -11,14 +11,15 @@ package http
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 
+	"github.com/Cloud-SPE/video-worker-node/internal/config"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/probe"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/abrrunner"
@@ -31,39 +32,44 @@ import (
 
 // Server is the HTTP entry layer.
 type Server struct {
-	mode        types.Mode
-	dev         bool
-	repo        *jobs.Repo
-	jobRunner   *jobrunner.Runner
-	abrRunner   *abrrunner.Runner
-	liveRunner  *liverunner.Runner
-	payment     paymentbroker.Broker
-	presets     *presetloader.Loader
-	prober      probe.Prober
-	authToken           string
-	offeringsAuthToken  string
-	logger              *slog.Logger
-	publicRTMP          string
-	maxConc             int
-	advertised          []string
+	mode               types.Mode
+	dev                bool
+	repo               *jobs.Repo
+	jobRunner          *jobrunner.Runner
+	abrRunner          *abrrunner.Runner
+	liveRunner         *liverunner.Runner
+	payment            paymentbroker.Broker
+	presets            *presetloader.Loader
+	prober             probe.Prober
+	apiVersion         int32
+	protocolVersion    int32
+	workerEthAddress   string
+	offeringsAuthToken string
+	logger             *slog.Logger
+	publicRTMP         string
+	maxConc            int
+	registryCaps       []config.RegistryCapability
 }
 
 // Config wires the Server.
 type Config struct {
-	Mode               types.Mode
-	Dev                bool
-	Repo               *jobs.Repo
-	JobRunner          *jobrunner.Runner
-	ABRRunner          *abrrunner.Runner
-	LiveRunner         *liverunner.Runner
-	Payment            paymentbroker.Broker
-	Presets            *presetloader.Loader
-	Prober             probe.Prober
-	AuthToken          string
-	Logger             *slog.Logger
-	PublicRTMPURL      string   // e.g., rtmp://ingest.example.com:1935/live
-	MaxConcurrent      int      // for /healthz reporting
-	AdvertisedCapabilities []string // e.g., ["video.transcode.vod","video.live.rtmp"]
+	Mode                 types.Mode
+	Dev                  bool
+	Repo                 *jobs.Repo
+	JobRunner            *jobrunner.Runner
+	ABRRunner            *abrrunner.Runner
+	LiveRunner           *liverunner.Runner
+	Payment              paymentbroker.Broker
+	Presets              *presetloader.Loader
+	Prober               probe.Prober
+	APIVersion           int32
+	ProtocolVersion      int32
+	WorkerEthAddress     string
+	RegistryCapabilities []config.RegistryCapability
+	AuthToken            string
+	Logger               *slog.Logger
+	PublicRTMPURL        string // e.g., rtmp://ingest.example.com:1935/live
+	MaxConcurrent        int    // for /health reporting
 }
 
 // New constructs a Server.
@@ -81,19 +87,21 @@ func New(cfg Config) (*Server, error) {
 		mode: cfg.Mode, dev: cfg.Dev, repo: cfg.Repo,
 		jobRunner: cfg.JobRunner, abrRunner: cfg.ABRRunner, liveRunner: cfg.LiveRunner,
 		payment: cfg.Payment, presets: cfg.Presets, prober: cfg.Prober,
-		authToken:          cfg.AuthToken,
-		offeringsAuthToken: os.Getenv("OFFERINGS_AUTH_TOKEN"),
+		apiVersion:         cfg.APIVersion,
+		protocolVersion:    cfg.ProtocolVersion,
+		workerEthAddress:   cfg.WorkerEthAddress,
+		offeringsAuthToken: cfg.AuthToken,
 		logger:             cfg.Logger,
-		publicRTMP: cfg.PublicRTMPURL, maxConc: cfg.MaxConcurrent,
-		advertised: cfg.AdvertisedCapabilities,
+		publicRTMP:         cfg.PublicRTMPURL,
+		maxConc:            cfg.MaxConcurrent,
+		registryCaps:       cloneRegistryCapabilities(cfg.RegistryCapabilities),
 	}, nil
 }
 
 // Handler returns the multiplexed handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /capabilities", s.handleCapabilities)
+	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /registry/offerings", s.handleRegistryOfferings)
 	mux.HandleFunc("GET /v1/video/transcode/presets", s.handleListPresets)
 	mux.HandleFunc("POST /v1/video/transcode/probe", s.handleProbe)
@@ -105,26 +113,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /stream/stop", s.handleStreamStop)
 	mux.HandleFunc("POST /stream/topup", s.handleStreamTopup)
 	mux.HandleFunc("POST /stream/status", s.handleStreamStatus)
-	return s.middleware(mux)
-}
-
-func (s *Server) middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Optional bearer token (separate from payment ticket).
-		if s.authToken != "" && r.Header.Get("Authorization") != "Bearer "+s.authToken {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	return mux
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	resp := map[string]any{
-		"status":         "ok",
-		"mode":           string(s.mode),
-		"dev":            s.dev,
-		"max_concurrent": s.maxConc,
+		"status":           "ok",
+		"mode":             string(s.mode),
+		"dev":              s.dev,
+		"api_version":      s.apiVersion,
+		"protocol_version": s.protocolVersion,
+		"max_concurrent":   s.maxConc,
 	}
 	if s.liveRunner != nil {
 		resp["active_streams"] = s.liveRunner.ActiveCount()
@@ -132,52 +131,42 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleCapabilities is the workload-native diagnostic endpoint.
-// Returns whatever's useful to the shell + operator dashboards in
-// transcode-worker terms (modes, codecs, ingest, max_concurrent).
-// NOT the modules-canonical capability fragment — that's
-// /registry/offerings.
-func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"capabilities":  s.advertised,
-		"public_rtmp":   s.publicRTMP,
-		"max_concurrent": s.maxConc,
-		"mode":          string(s.mode),
-	})
-}
-
-// handleRegistryOfferings emits the modules-canonical capability
-// fragment the orch-coordinator scrapes (per
-// service-registry-daemon/docs/design-docs/worker-offerings-endpoint.md).
-//
-// Body shape: `{"capabilities": [{"name", "work_unit", "offerings": [...]}]}`.
-// Worker doesn't include node identity — operator types it into the
-// coordinator roster row.
-//
-// Auth: optional bearer via OFFERINGS_AUTH_TOKEN env. Default off.
 func (s *Server) handleRegistryOfferings(w http.ResponseWriter, r *http.Request) {
 	if s.offeringsAuthToken != "" {
+		got := r.Header.Get("Authorization")
 		want := "Bearer " + s.offeringsAuthToken
-		if r.Header.Get("Authorization") != want {
-			http.Error(w, `{"error":{"code":"unauthorized"}}`, http.StatusUnauthorized)
+		if len(got) != len(want) || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
 			return
 		}
 	}
-	// Map workload-native capability strings (advertised) to the
-	// modules-canonical fragment. work_unit defaults to "frame" for
-	// transcoding capabilities; operator can override per offering in
-	// the coordinator's roster.
-	caps := make([]map[string]any, 0, len(s.advertised))
-	for _, c := range s.advertised {
-		caps = append(caps, map[string]any{
-			"name":      c,
-			"work_unit": "frame",
-			// No offerings published from the worker — operator types
-			// preset/price tiers into the coordinator's roster.
-			"offerings": []map[string]any{},
-		})
+	caps := make([]map[string]any, 0, len(s.registryCaps))
+	for _, capability := range s.registryCaps {
+		projectedCapability := map[string]any{
+			"name":      capability.Name,
+			"work_unit": capability.WorkUnit,
+			"offerings": make([]map[string]any, 0, len(capability.Offerings)),
+		}
+		if capability.Extra != nil {
+			projectedCapability["extra"] = capability.Extra
+		}
+		for _, offering := range capability.Offerings {
+			projectedOffering := map[string]any{
+				"id":                      offering.ID,
+				"price_per_work_unit_wei": offering.PricePerWorkUnitWei,
+			}
+			if offering.Constraints != nil {
+				projectedOffering["constraints"] = offering.Constraints
+			}
+			projectedCapability["offerings"] = append(projectedCapability["offerings"].([]map[string]any), projectedOffering)
+		}
+		caps = append(caps, projectedCapability)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"capabilities": caps})
+	resp := map[string]any{"capabilities": caps}
+	if s.workerEthAddress != "" {
+		resp["worker_eth_address"] = s.workerEthAddress
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleListPresets(w http.ResponseWriter, _ *http.Request) {
@@ -229,9 +218,9 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		DurationSec: res.DurationSeconds,
 		Width:       res.Width,
 		Height:      res.Height,
-		FrameRate:   30,        // placeholder; ffprobe -show_streams gives us avg_frame_rate
-		AudioCodec:  "aac",     // placeholder
-		VideoCodec:  "h264",    // placeholder
+		FrameRate:   30,     // placeholder; ffprobe -show_streams gives us avg_frame_rate
+		AudioCodec:  "aac",  // placeholder
+		VideoCodec:  "h264", // placeholder
 		Raw:         res,
 	})
 }
@@ -588,4 +577,15 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{
 		"code": code, "message": message,
 	})
+}
+
+func cloneRegistryCapabilities(in []config.RegistryCapability) []config.RegistryCapability {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]config.RegistryCapability, 0, len(in))
+	for _, capability := range in {
+		out = append(out, capability.Clone())
+	}
+	return out
 }

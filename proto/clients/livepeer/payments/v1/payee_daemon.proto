@@ -12,21 +12,24 @@ syntax = "proto3";
 
 package livepeer.payments.v1;
 
-option go_package = "github.com/Cloud-SPE/livepeer-video-platform/apps/transcode-worker-node/proto/clients/livepeer/payments/v1;paymentsv1";
-
 import "livepeer/payments/v1/types.proto";
 
 service PayeeDaemon {
-  // Return the TicketParams and per-model pricing for a (sender, capability)
+  // Return the TicketParams and per-offering pricing for a (sender, capability)
   // pair. The payer app queries this via its PayeeApp peer and hands the
   // result to its own PayerDaemon when starting a session. One TicketParams
-  // covers every model on the capability; per-model prices are carried in
-  // `model_prices` and are what the payer checks against when billing.
+  // covers every offering on the capability; per-offering prices are carried in
+  // `offering_prices` and are what the payer checks against when billing.
   rpc GetQuote(GetQuoteRequest) returns (GetQuoteResponse);
 
-  // Return the daemon's full configured capability catalog. The worker-node
-  // calls this at startup to cross-check its own shared-YAML parse against
-  // the daemon's — mismatch is a fail-closed condition. Also drives the
+  // Return canonical payee-issued TicketParams for an exact sender /
+  // recipient / face-value tuple. This is the v3.0.1 replacement for the
+  // cryptographic half of the old quote flow: pricing comes from manifest /
+  // resolver, while the payee still owns recipientRandHash and expiry
+  // generation.
+  rpc GetTicketParams(GetTicketParamsRequest) returns (GetTicketParamsResponse);
+
+  // Return the daemon's full configured capability catalog. Drives the
   // worker's /capabilities HTTP response.
   rpc ListCapabilities(ListCapabilitiesRequest) returns (ListCapabilitiesResponse);
 
@@ -64,30 +67,50 @@ message GetQuoteRequest {
 
   // Capability the sender intends to purchase. The daemon maps this to the
   // `PriceInfo.capability` uint32 at the wire boundary. One capability may
-  // host many models; the response lists them all.
+  // host many offerings; the response lists them all.
   string capability = 2;
 }
 
 message GetQuoteResponse {
   // Single TicketParams for this (sender, capability). Face value is sized
-  // to cover the most expensive model on this capability so one session
-  // covers the whole model set without re-keying RecipientRandHash per
-  // model.
+  // to cover the most expensive offering on this capability so one session
+  // covers the whole offering set without re-keying RecipientRandHash per
+  // offering.
   TicketParams ticket_params = 1;
 
-  // Per-model pricing. Ordered by model name for deterministic comparison
+  // Per-offering pricing. Ordered by offering id for deterministic comparison
   // on the bridge's quote-refresh cycle. Empty iff the daemon has no
-  // models configured for this capability (caller should treat as NotFound).
-  repeated ModelPrice model_prices = 2;
+  // offerings configured for this capability (caller should treat as NotFound).
+  repeated OfferingPrice offering_prices = 2;
 }
 
-// ModelPrice pairs a model identifier with its wei-per-work-unit price.
+message GetTicketParamsRequest {
+  // ETH address of the sender that will sign the ticket.
+  bytes sender = 1;
+
+  // ETH address of the intended recipient. Must match the receiver daemon's
+  // configured recipient when provided.
+  bytes recipient = 2;
+
+  // Exact requested ticket face value in wei, big-endian bytes.
+  bytes face_value = 3;
+
+  // Optional capability / offering metadata for logging and future metrics.
+  string capability = 4;
+  string offering = 5;
+}
+
+message GetTicketParamsResponse {
+  TicketParams ticket_params = 1;
+}
+
+// OfferingPrice pairs an offering identifier with its wei-per-work-unit price.
 // Shared between GetQuoteResponse and ListCapabilitiesResponse so the two
 // surfaces cannot drift.
-message ModelPrice {
-  // Model identifier, e.g. "llama-3.3-70b". Must match the model string the
+message OfferingPrice {
+  // Offering identifier, e.g. "llama-3.3-70b". Must match the offering string the
   // bridge uses when resolving a request to a node.
-  string model = 1;
+  string id = 1;
 
   // Price for one work unit (see CapabilityEntry.work_unit for the meaning
   // of "unit" on this capability).
@@ -99,12 +122,11 @@ message ModelPrice {
 message ListCapabilitiesRequest {}
 
 message ListCapabilitiesResponse {
-  // Matches `protocol_version` in the shared worker.yaml. Worker-node uses
-  // this to detect daemon/worker version skew before comparing payload.
-  int32 protocol_version = 1;
+  reserved 1;
+  reserved "protocol_version";
 
   // Full capability catalog as parsed by the daemon at startup. Ordered
-  // by capability string, then model name, for deterministic comparison.
+  // by capability string, then offering id, for deterministic comparison.
   repeated CapabilityEntry capabilities = 2;
 }
 
@@ -120,8 +142,8 @@ message CapabilityEntry {
   // bridge.
   string work_unit = 2;
 
-  // Models served on this capability, with their configured prices.
-  repeated ModelPrice models = 3;
+  // Offerings served on this capability, with their configured prices.
+  repeated OfferingPrice offerings = 3;
 }
 
 message ProcessPaymentRequest {

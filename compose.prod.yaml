@@ -3,10 +3,9 @@
 # Standalone — paste into Portainer as a single Stack, or run:
 #   docker compose -f compose.prod.yaml --env-file .env up -d
 #
-# Three services:
-#   - payment-daemon          (receiver mode, Arbitrum One mainnet)
-#   - service-registry-daemon (publisher mode, advertises capabilities)
-#   - video-worker            (the Go daemon, GPU-aware)
+# Two services:
+#   - payment-daemon (receiver mode, Arbitrum One mainnet)
+#   - video-worker   (the Go daemon, GPU-aware)
 #
 # Ingress:
 #   Cloudflare Tunnel hits `video-worker:8081` (HTTP) directly, and
@@ -52,36 +51,11 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  service-registry-daemon:
-    image: tztcloud/livepeer-service-registry-daemon:${REGISTRY_DAEMON_TAG:-v1.2.0}
-    restart: unless-stopped
-    command:
-      - --mode=publisher
-      - --socket=/var/run/livepeer-registry/daemon.sock
-      - --config=/etc/livepeer/worker.yaml
-      - --log-level=${REGISTRY_LOG_LEVEL:-info}
-    volumes:
-      - ${WORKER_YAML_PATH:-./worker.yaml}:/etc/livepeer/worker.yaml:ro
-      - registry-sock:/var/run/livepeer-registry
-    logging:
-      driver: json-file
-      options:
-        max-size: '10m'
-        max-file: '5'
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256m
-    security_opt:
-      - no-new-privileges:true
-
   video-worker:
     image: tztcloud/livepeer-video-worker-node-${GPU_VENDOR:-nvidia}:${WORKER_TAG:-latest}
     restart: unless-stopped
     depends_on:
       - payment-daemon
-      - service-registry-daemon
     command:
       - --mode=${WORKER_MODE:-vod}
       - --config=/etc/livepeer/worker.yaml
@@ -93,7 +67,6 @@ services:
       - ${WORKER_YAML_PATH:-./worker.yaml}:/etc/livepeer/worker.yaml:ro
       - ${PRESETS_PATH:-./presets}:/etc/livepeer/presets:ro
       - payment-sock:/var/run/livepeer-payment:ro
-      - registry-sock:/var/run/livepeer-registry:ro
       - worker-data:/var/lib/livepeer
     ports:
       # HTTP — published to the host so cloudflared (if running outside
@@ -133,7 +106,6 @@ services:
 volumes:
   payment-sock:
   payment-data:
-  registry-sock:
   worker-data:
 
 networks:
