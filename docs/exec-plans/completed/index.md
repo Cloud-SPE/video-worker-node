@@ -11,6 +11,7 @@ Archived plans authored in this repo. **Do not modify.** History is immutable.
 ## Catalog
 
 - [`0001-extract-from-platform.md`](0001-extract-from-platform.md) — Lift the worker out of the `livepeer-video-platform` monorepo into this standalone repo. Closed 2026-04-29 across four phases (bootstrap → code lift → doc lift → verification + final wiring). Inherited three pre-existing source bugs as documented tech debt: `internal/runtime/metrics` data race, `lint/doc-gardener` no-op stub, stale `proto/buf.yaml` `livepeer/transcode/v1` module.
+- [`0002-v3-archetype-a-alignment.md`](0002-v3-archetype-a-alignment.md) — Earlier v3.0.0 archetype-A cleanup draft. Abandoned 2026-05-01 after the finalized v3.0.1 specs widened the contract (shared `worker.yaml`, `/health`, `worker_eth_address`, `auth_token`, `/capabilities` deletion, standardized video capability strings). Superseded by active plans `0003` and `0004`.
 
 ## What is *not* here
 

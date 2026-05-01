@@ -2,7 +2,7 @@
 id: 0002
 slug: v3-archetype-a-alignment
 title: v3.0.0 — strip self-publishing, add `/registry/offerings`, rename `models` → `offerings`
-status: drafted
+status: abandoned
 owner: agent
 opened: 2026-04-29
 depends-on: 0001
@@ -36,6 +36,14 @@ code lift (Phase 2):
    parser to match the modules v3.0.0 schema. Workload-native
    `/capabilities` shape stays unchanged — the rename only applies
    inside the v3.0.0-canonical body of `/registry/offerings`.
+
+## Closure note
+
+Superseded by the finalized v3.0.1 contract and the newer local plans
+[`0003-v3-0-1-worker-contract-alignment.md`](../active/0003-v3-0-1-worker-contract-alignment.md)
+and [`0004-live-mode-session-failure-contract.md`](../active/0004-live-mode-session-failure-contract.md).
+This plan was drafted against an earlier v3.0.0 understanding and is no
+longer the right execution artifact.
 
 ## Sequencing relative to plan 0001
 
@@ -138,7 +146,14 @@ review attention.
 
 ## Decisions log
 
-(empty)
+### 2026-05-01 — Abandoned in favor of the finalized v3.0.1 plan set
+Reason: the latest network spec and worker-specific CR/spec files now
+pin additional behavior this draft does not cover: shared `worker.yaml`
+as the canonical worker/receiver contract, top-level `worker_eth_address`
+and `auth_token`, `/capabilities` deletion, `/health` replacing
+`/healthz`, standardized video capability strings, and the updated
+payment-daemon proto surface. Keeping this draft active would advertise
+the wrong migration path.
 
 ## Open questions
 

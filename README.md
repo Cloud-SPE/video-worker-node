@@ -2,7 +2,9 @@
 
 Go daemon that performs FFmpeg-subprocess transcoding (VOD / ABR / Live HLS) on Livepeer BYOC. Sister of [`openai-worker-node`](https://github.com/Cloud-SPE/openai-worker-node) — same scaffolding pattern, different workload.
 
-> **Status: bootstrapping.** This repo is in [exec-plan 0001](docs/exec-plans/active/0001-extract-from-platform.md) Phase 1 — pillar docs only, no Go code yet. Build, test, and run instructions below become concrete after Phase 2 (the code lift).
+> **Status:** active Go implementation with docs still catching up in a
+> few places. Treat the code and current product/design docs as the live
+> contract, not older bootstrapping language.
 
 ## What it is
 

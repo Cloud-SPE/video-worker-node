@@ -25,8 +25,8 @@ Someone with GPU capacity who wants to sell **transcode-seconds** (VOD, ABR ladd
 
 Someone running a video gateway (Cloud-SPE's `livepeer-video-gateway`, or any other HTTP API that fronts these workers) who lists this worker via `service-registry-daemon`. They care about:
 
-- A **predictable HTTP contract** (`/health`, `/capabilities`, `POST /v1/video/transcode`, `POST /stream/start`, RTMP `:1935`).
-- A **truthful `/capabilities` response** — what the worker advertises (resolutions, codecs, GPU vendor, live support) is what the worker can deliver.
+- A **predictable HTTP contract** (`/healthz`, `/registry/offerings`, `POST /v1/video/transcode`, `POST /stream/start`, RTMP `:1935`).
+- A **truthful `/registry/offerings` response** — what the worker advertises for coordinator/operator consumption is what the worker can deliver.
 - **Clean error modes:** `payment-required`, `capacity-exceeded`, `model-unsupported`, `gpu-busy` are distinguishable.
 - **Reliable webhooks** (HMAC-signed, retried with backoff) so state transitions in the worker can be reflected in the shell's DB without polling.
 

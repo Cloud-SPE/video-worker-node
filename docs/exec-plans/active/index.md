@@ -12,4 +12,5 @@ Plan format and lifecycle: [`PLANS.md`](../../../PLANS.md).
 
 ## In flight
 
-- [`0002-v3-archetype-a-alignment.md`](0002-v3-archetype-a-alignment.md) — v3.0.0: strip worker self-publishing, add `/registry/offerings`, rename `models` → `offerings`. Depends on 0001. Status: **drafted**.
+- [`0003-v3-0-1-worker-contract-alignment.md`](0003-v3-0-1-worker-contract-alignment.md) — shared `worker.yaml`, canonical `/registry/offerings`, `/health`, archetype-A deploy/docs sweep, and proto refresh for the finalized v3.0.1 worker contract. Depends on 0001. Status: **drafted**.
+- [`0004-live-mode-session-failure-contract.md`](0004-live-mode-session-failure-contract.md) — fail-fast live encode error surfacing and resource cleanup for the v3.0.1 live-session contract. Depends on 0003. Status: **drafted**.

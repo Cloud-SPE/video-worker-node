@@ -38,12 +38,14 @@ shell is the only intended client.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/healthz` | liveness + mode + active stream count |
-| GET | `/capabilities` | mirror of capability strings advertised to service-registry, plus `public_rtmp` URL and `max_concurrent` |
+| GET | `/registry/offerings` | suite-wide capability advertisement for orch-coordinator scrape; omits internal `backend_url`, may include orch-internal `worker_eth_address` |
 
 ## Auth
 
-Optional bearer token via `Authorization: Bearer <token>` if
-`--auth-token=<token>` is set. Independent of payment ticket validation.
+Optional bearer token via `Authorization: Bearer <token>` when
+top-level `auth_token` is configured in shared `worker.yaml`. In the
+v3.0.1 contract this gates `GET /registry/offerings`; payment ticket
+validation is separate.
 
 Paid endpoints additionally require a base64-encoded `payment_ticket`
 field in the request body, which the worker validates against

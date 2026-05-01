@@ -90,7 +90,7 @@ The shell resolves workers by these strings. See
 | Endpoint | Default | Notes |
 |---|---|---|
 | `GET /healthz` | `:8081` | Liveness + mode + active stream count |
-| `GET /capabilities` | `:8081` | Mirror of advertised capability strings + public RTMP URL |
+| `GET /registry/offerings` | `:8081` | Suite-wide capability advertisement for orch-coordinator scrape |
 | `GET /metrics` | `:9091` (off by default) | Prometheus; prefix `livepeer_videoworker_*` |
 | Operator gRPC | unix socket | `--grpc-socket=/var/run/...` |
 

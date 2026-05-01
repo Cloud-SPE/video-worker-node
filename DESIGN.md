@@ -170,7 +170,7 @@ calls go out from this binary.
 Endpoints exposed (defined in `docs/product-specs/http-api.md`, lifts in Phase 3):
 
 - `GET /health` — liveness + `protocol_version` + `inflight`
-- `GET /capabilities` — what this worker advertises (mirrors what was registered)
+- `GET /registry/offerings` — suite-wide worker advertisement surface
 - `POST /v1/video/transcode` — VOD work, paid
 - `POST /v1/video/transcode/abr` — ABR ladder work, paid
 - `POST /stream/start` — open a live session, paid

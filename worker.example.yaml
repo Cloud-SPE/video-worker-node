@@ -56,7 +56,7 @@ capabilities:
   # video.realtime.whip — tech-debt (WebRTC)
 
 # ---- auth ----
-auth_token: ""                     # optional bearer for the public HTTP API
+auth_token: ""                     # optional bearer for GET /registry/offerings
 
 # ---- log ----
 log_level: info                    # error|warn|info|debug
