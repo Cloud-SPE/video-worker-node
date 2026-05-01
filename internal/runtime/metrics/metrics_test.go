@@ -7,6 +7,19 @@ import (
 	"time"
 )
 
+func waitForAddr(t *testing.T, s *Server) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if addr := s.Addr(); addr != "" {
+			return addr
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("listener did not publish bound address")
+	return ""
+}
+
 func TestNewEmptyDisabled(t *testing.T) {
 	t.Parallel()
 	s, err := New("", 0)
@@ -57,15 +70,23 @@ func TestHealthAndMetrics(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- s.Listen(ctx) }()
-	// Wait for listener.
-	time.Sleep(50 * time.Millisecond)
-	// Find the actual address.
-	if s.srv == nil {
-		t.Fatal("srv not initialized")
+	addr := waitForAddr(t, s)
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
 	}
-	// Listen used "127.0.0.1:0" which lets the kernel pick the port. We
-	// don't expose the chosen port in the test API, so settle for
-	// shutdown coverage and Recorder.
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz: status=%d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	resp, err = http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("metrics: status=%d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
 	if got := s.Recorder(); got == nil {
 		t.Fatal("recorder")
 	}

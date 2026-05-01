@@ -27,6 +27,7 @@ type Server struct {
 	addr     string
 	maxSeries int
 	srv      *http.Server
+	boundAddr string
 	mu       sync.Mutex
 }
 
@@ -68,6 +69,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.srv = srv
+	s.boundAddr = lis.Addr().String()
 	s.mu.Unlock()
 
 	errCh := make(chan error, 1)
@@ -93,6 +95,14 @@ func (s *Server) Stop() {
 	if s.srv != nil {
 		_ = s.srv.Shutdown(context.Background())
 	}
+}
+
+// Addr returns the bound listener address once Listen has successfully
+// started serving. Empty means the listener has not bound yet.
+func (s *Server) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.boundAddr
 }
 
 // ErrAddrEmpty is returned when New is called with an empty addr (listener
