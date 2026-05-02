@@ -7,16 +7,21 @@ package http
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cloud-SPE/video-worker-node/internal/config"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/ingest"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/shellclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/store"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/liverunner"
@@ -32,6 +37,18 @@ type fakeTicketParamsClient struct {
 	err    error
 	last   paymentclient.GetTicketParamsRequest
 }
+
+type fakeIngestSession struct {
+	streamKey string
+	reader    io.Reader
+}
+
+func (s *fakeIngestSession) Protocol() ingest.Protocol { return ingest.ProtocolRTMP }
+func (s *fakeIngestSession) StreamKey() string         { return s.streamKey }
+func (*fakeIngestSession) MediaFormat() string         { return "flv" }
+func (s *fakeIngestSession) Reader() io.Reader         { return s.reader }
+func (*fakeIngestSession) RemoteAddr() string          { return "127.0.0.1:54321" }
+func (*fakeIngestSession) Close() error                { return nil }
 
 func (f *fakeTicketParamsClient) GetTicketParams(_ context.Context, req paymentclient.GetTicketParamsRequest) (paymentclient.TicketParams, error) {
 	f.last = req
@@ -102,6 +119,30 @@ func newTestServer(t *testing.T, mode types.Mode) *Server {
 		t.Fatalf("server: %v", err)
 	}
 	return srv
+}
+
+func newPaidLiveTestServer(t *testing.T) (*Server, *paymentbroker.Fake) {
+	t.Helper()
+	repo := jobs.New(store.Memory())
+	pl := mustTestPresets(t)
+	lr, err := liverunner.New(liverunner.Config{Repo: repo, Presets: pl})
+	if err != nil {
+		t.Fatalf("liverunner: %v", err)
+	}
+	payment := paymentbroker.NewFake()
+	srv, err := New(Config{
+		Mode:          types.ModeLive,
+		Dev:           false,
+		Repo:          repo,
+		Presets:       pl,
+		LiveRunner:    lr,
+		Payment:       payment,
+		PublicRTMPURL: "rtmp://localhost:1935/live",
+	})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	return srv, payment
 }
 
 func TestHandleHealth(t *testing.T) {
@@ -226,6 +267,284 @@ func TestHandleStreamStartWrongMode(t *testing.T) {
 	}
 }
 
+func TestHandleSessionStartAcceptsPaymentAndReturnsCorrelationFields(t *testing.T) {
+	srv, payment := newPaidLiveTestServer(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sessions/start", strings.NewReader(`{"gateway_session_id":"gw_123","preset":"720p"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-123")))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp SessionStartResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.GatewaySessionID != "gw_123" {
+		t.Fatalf("gateway_session_id=%q", resp.GatewaySessionID)
+	}
+	if resp.WorkID == "" {
+		t.Fatal("empty work_id")
+	}
+	if resp.WorkerSessionID == "" {
+		t.Fatal("empty worker_session_id")
+	}
+	if resp.RTMPURL != "rtmp://localhost:1935/live" {
+		t.Fatalf("rtmp_url=%q", resp.RTMPURL)
+	}
+	if payment.Balance(resp.WorkID) == 0 {
+		t.Fatalf("expected credited balance for work_id %q", resp.WorkID)
+	}
+	if resp.Stream.GatewaySessionID != "gw_123" {
+		t.Fatalf("stream.gateway_session_id=%q", resp.Stream.GatewaySessionID)
+	}
+	if resp.Stream.WorkerSessionID != resp.WorkerSessionID {
+		t.Fatalf("stream.worker_session_id=%q want %q", resp.Stream.WorkerSessionID, resp.WorkerSessionID)
+	}
+	if resp.Stream.PaymentWorkID != resp.WorkID {
+		t.Fatalf("stream.payment_work_id=%q want %q", resp.Stream.PaymentWorkID, resp.WorkID)
+	}
+}
+
+func TestHandleSessionTopupCreditsExistingWorkID(t *testing.T) {
+	srv, payment := newPaidLiveTestServer(t)
+	startRec := httptest.NewRecorder()
+	startReq := httptest.NewRequest("POST", "/api/sessions/start", strings.NewReader(`{"gateway_session_id":"gw_123","preset":"720p"}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-123")))
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", startRec.Code, startRec.Body.String())
+	}
+	var startResp SessionStartResponse
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+	before := payment.Balance(startResp.WorkID)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sessions/gw_123/topup", nil)
+	req.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-topup")))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp SessionTopupResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.WorkID != startResp.WorkID {
+		t.Fatalf("work_id=%q want %q", resp.WorkID, startResp.WorkID)
+	}
+	if payment.Balance(startResp.WorkID) <= before {
+		t.Fatalf("expected topup to increase balance for %q", startResp.WorkID)
+	}
+}
+
+func TestHandleSessionEndClosesPaymentSession(t *testing.T) {
+	srv, payment := newPaidLiveTestServer(t)
+	startRec := httptest.NewRecorder()
+	startReq := httptest.NewRequest("POST", "/api/sessions/start", strings.NewReader(`{"gateway_session_id":"gw_123","preset":"720p"}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-123")))
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", startRec.Code, startRec.Body.String())
+	}
+	var startResp SessionStartResponse
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sessions/gw_123/end", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !payment.IsClosed(startResp.WorkID) {
+		t.Fatalf("expected CloseSession for work_id %q", startResp.WorkID)
+	}
+	if payment.CloseCount(startResp.WorkID) != 1 {
+		t.Fatalf("CloseCount=%d want 1", payment.CloseCount(startResp.WorkID))
+	}
+}
+
+func TestHandleSessionTopupFallsBackToPersistedSessionInfo(t *testing.T) {
+	srv, payment := newPaidLiveTestServer(t)
+	startRec := httptest.NewRecorder()
+	startReq := httptest.NewRequest("POST", "/api/sessions/start", strings.NewReader(`{"gateway_session_id":"gw_123","preset":"720p"}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-123")))
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", startRec.Code, startRec.Body.String())
+	}
+	var startResp SessionStartResponse
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+	srv.liveSessions.Delete("gw_123")
+	before := payment.Balance(startResp.WorkID)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sessions/gw_123/topup", nil)
+	req.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-topup")))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if payment.Balance(startResp.WorkID) <= before {
+		t.Fatalf("expected fallback topup to increase balance for %q", startResp.WorkID)
+	}
+}
+
+func TestHandleSessionEndFallsBackToPersistedSessionInfo(t *testing.T) {
+	srv, payment := newPaidLiveTestServer(t)
+	startRec := httptest.NewRecorder()
+	startReq := httptest.NewRequest("POST", "/api/sessions/start", strings.NewReader(`{"gateway_session_id":"gw_123","preset":"720p"}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-123")))
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", startRec.Code, startRec.Body.String())
+	}
+	var startResp SessionStartResponse
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+	srv.liveSessions.Delete("gw_123")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sessions/gw_123/end", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !payment.IsClosed(startResp.WorkID) {
+		t.Fatalf("expected fallback CloseSession for work_id %q", startResp.WorkID)
+	}
+}
+
+func TestHandleSessionTopupRejectsTerminalPersistedSession(t *testing.T) {
+	srv, _ := newPaidLiveTestServer(t)
+	if err := srv.repo.SaveStream(context.Background(), types.Stream{
+		WorkID:           "gw_123",
+		GatewaySessionID: "gw_123",
+		WorkerSessionID:  "worker_123",
+		PaymentWorkID:    "work_123",
+		Phase:            types.StreamPhaseClosed,
+	}); err != nil {
+		t.Fatalf("save stream: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sessions/gw_123/topup", nil)
+	req.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-topup")))
+	srv.liveSessions.Upsert(liveSessionInfo{
+		GatewaySessionID: "gw_123",
+		WorkerSessionID:  "worker_123",
+		WorkID:           "work_123",
+		StreamID:         "gw_123",
+	})
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := srv.liveSessions.Get("gw_123"); ok {
+		t.Fatal("expected stale in-memory session mapping to be removed")
+	}
+}
+
+func TestHandleSessionEndRejectsTerminalPersistedSession(t *testing.T) {
+	srv, _ := newPaidLiveTestServer(t)
+	if err := srv.repo.SaveStream(context.Background(), types.Stream{
+		WorkID:           "gw_123",
+		GatewaySessionID: "gw_123",
+		WorkerSessionID:  "worker_123",
+		PaymentWorkID:    "work_123",
+		Phase:            types.StreamPhaseClosed,
+	}); err != nil {
+		t.Fatalf("save stream: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sessions/gw_123/end", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleSessionEndAcceptedPatternBClosesPaymentOnce(t *testing.T) {
+	repo := jobs.New(store.Memory())
+	pl := mustTestPresets(t)
+	payment := paymentbroker.NewFake()
+	shell := shellclient.NewFake()
+	shell.ValidateFunc = func(_ context.Context, _ shellclient.ValidateKeyInput) (shellclient.ValidateKeyResult, error) {
+		return shellclient.ValidateKeyResult{Accepted: true, StreamID: "gw_123", ProjectID: "proj_fake", RecordingEnabled: false}, nil
+	}
+	lr, err := liverunner.New(liverunner.Config{
+		Repo:           repo,
+		Presets:        pl,
+		Payment:        payment,
+		Shell:          shell,
+		EncoderFactory: liverunner.NewDrainEncoder,
+		WorkerURL:      "http://worker:8080",
+		LivePreset:     "h264-live",
+		DebitCadence:   20 * time.Millisecond,
+		RunwaySeconds:  30,
+		GraceSeconds:   1,
+	})
+	if err != nil {
+		t.Fatalf("liverunner: %v", err)
+	}
+	srv, err := New(Config{
+		Mode:          types.ModeLive,
+		Dev:           false,
+		Repo:          repo,
+		Presets:       pl,
+		LiveRunner:    lr,
+		Payment:       payment,
+		PublicRTMPURL: "rtmp://localhost:1935/live",
+	})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	startRec := httptest.NewRecorder()
+	startReq := httptest.NewRequest("POST", "/api/sessions/start", strings.NewReader(`{"gateway_session_id":"gw_123","preset":"720p"}`))
+	startReq.Header.Set("Content-Type", "application/json")
+	startReq.Header.Set("livepeer-payment", base64.StdEncoding.EncodeToString([]byte("ticket-123")))
+	srv.Handler().ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", startRec.Code, startRec.Body.String())
+	}
+	var startResp SessionStartResponse
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+	pr, _ := io.Pipe()
+	sess := &fakeIngestSession{streamKey: "sk_live_pattern_b", reader: pr}
+	if _, err := lr.Accept(context.Background(), sess); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	endRec := httptest.NewRecorder()
+	endReq := httptest.NewRequest("POST", "/api/sessions/gw_123/end", nil)
+	srv.Handler().ServeHTTP(endRec, endReq)
+	if endRec.Code != http.StatusOK {
+		t.Fatalf("end status=%d body=%s", endRec.Code, endRec.Body.String())
+	}
+	if !payment.IsClosed(startResp.WorkID) {
+		t.Fatalf("expected CloseSession for work_id %q", startResp.WorkID)
+	}
+	if payment.CloseCount(startResp.WorkID) != 1 {
+		t.Fatalf("CloseCount=%d want 1", payment.CloseCount(startResp.WorkID))
+	}
+}
+
 func TestRegistryOfferingsAuthToken(t *testing.T) {
 	srv := newTestServer(t, types.ModeLive)
 	srv.offeringsAuthToken = "secret"
@@ -311,8 +630,12 @@ func TestHandleVODSubmitRequiresPaymentWhenBrokerWired(t *testing.T) {
 func TestHandleStreamStatusAcceptsStreamID(t *testing.T) {
 	srv := newTestServer(t, types.ModeLive)
 	if err := srv.repo.SaveStream(context.Background(), types.Stream{
-		WorkID: "live_1",
-		Phase:  types.StreamPhaseStreaming,
+		WorkID:           "live_1",
+		GatewaySessionID: "gw_123",
+		WorkerSessionID:  "worker_123",
+		PaymentWorkID:    "work_123",
+		Phase:            types.StreamPhaseLowBalance,
+		LowBalance:       true,
 	}); err != nil {
 		t.Fatalf("save stream: %v", err)
 	}
@@ -323,6 +646,16 @@ func TestHandleStreamStatusAcceptsStreamID(t *testing.T) {
 	srv.Handler().ServeHTTP(statusRec, statusReq)
 	if statusRec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var resp types.Stream
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.GatewaySessionID != "gw_123" || resp.WorkerSessionID != "worker_123" || resp.PaymentWorkID != "work_123" {
+		t.Fatalf("unexpected correlation fields: %+v", resp)
+	}
+	if resp.Phase != types.StreamPhaseLowBalance || !resp.LowBalance {
+		t.Fatalf("unexpected runtime state: %+v", resp)
 	}
 }
 

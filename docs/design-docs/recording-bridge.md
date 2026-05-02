@@ -1,10 +1,22 @@
 ---
 title: Recording bridge (live → VOD)
-status: accepted
-last-reviewed: 2026-04-26
+status: drafted
+last-reviewed: 2026-05-02
 ---
 
 # Recording bridge
+
+> **Transition note**: the worker side of this flow is changing. Runtime
+> session termination and recording finalization are now separate worker
+> events under Pattern B:
+>
+> - worker emits `session.ended` when live runtime stops
+> - worker emits `session.recording.ready` only after final segment state
+>   is known
+>
+> This file still describes the shell/gateway-side recording adoption
+> behavior, but references to `/session-ended` and
+> `/recording-finalized` should be read as transitional callback names.
 
 When a live stream ends with `recording_enabled = true`, the platform
 converts the live segments into a VOD asset. The same `PlaybackID` that
@@ -16,10 +28,10 @@ keys transition**, and **what fires when**.
 ## Trigger sequence
 
 1. Worker's per-stream goroutine exits (broadcaster disconnect or graceful close with `recording_enabled=true`).
-2. Worker calls `POST /internal/live/session-ended` with `reason: 'graceful'`.
+2. Worker reports live runtime end (`session.ended`; legacy callback name: `POST /internal/live/session-ended`) with `reason: 'graceful'`.
 3. Shell flips `media.live_streams.status` → `recording_processing`, fires `video.live_stream.ended`.
 4. Worker's `livecdn.Mirror` finishes its final scan, pushing any straggler segments to the sink.
-5. Worker calls `POST /internal/live/recording-finalized` with the cumulative segment list + master key + total duration.
+5. Worker reports recording finalization readiness (`session.recording.ready`; legacy callback name: `POST /internal/live/recording-finalized`) with the cumulative segment list + master key + total duration.
 6. Shell's `recordingFinalizer.finalize()` runs (described below).
 7. Shell flips `media.live_streams.status` → `recording_ready`, sets `recording_asset_id`, fires `video.live_stream.recording_ready` AND `video.asset.ready`.
 
@@ -99,7 +111,7 @@ recordings. Documented as part of plan 0006 §K.
 ## Cross-references
 
 - [`live-state-machine.md`](live-state-machine.md)
-- [`internal-callback-api.md`](internal-callback-api.md) — wire format for `/recording-finalized`.
+- [`internal-callback-api.md`](internal-callback-api.md) — transitional callback reference for recording-finalization payloads.
 - [`storage-layout.md`](storage-layout.md) — overall path conventions.
 - Plan 0005 — VOD job DAG (reused for tier-upgrade re-encodes).
 - Plan 0006 §G — original implementation plan.

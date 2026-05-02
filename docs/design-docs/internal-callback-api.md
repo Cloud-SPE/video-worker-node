@@ -1,17 +1,58 @@
 ---
 title: Internal callback API (worker → shell)
-status: accepted
-last-reviewed: 2026-04-26
+status: drafted
+last-reviewed: 2026-05-02
 ---
 
 # Internal callback API (worker → shell)
 
+> **Transition note**: this file exists mainly to explain the shell-side
+> integration seam during migration. The worker is now centered on a
+> smaller Pattern B surface where:
+>
+> - `validate-key` remains a separate RTMP admission call
+> - authoritative worker lifecycle/accounting events flow through
+>   `POST /internal/live/events`
+> - legacy `session-active`, `session-tick`, `session-ended`,
+>   `recording-finalized`, and `topup` remain only as transitional
+>   compatibility while the gateway rewrite is in flight
+
 The shell exposes a small HTTP surface that **only** the worker is
-expected to call. It's how the worker reports stream-lifecycle events
-back to the shell so customer webhooks fire and balance accounting
-stays correct. This API is **not** part of the engine package — it's a
-pure shell concern that lives next to the gateway and isn't exposed to
-customers.
+expected to call. This API is **not** part of the engine package — it's
+a pure shell concern that lives next to the gateway and isn't exposed
+to customers.
+
+For the current worker direction, the most important contract is the
+typed event-ingest endpoint:
+
+### `/internal/live/events`
+
+Worker posts canonical Pattern B events here. The event body carries
+`gateway_session_id` plus, when available:
+
+- `worker_session_id`
+- `work_id`
+- `usage_seq`
+- `units`
+- `unit_type`
+- `remaining_runway_units`
+- `low_balance`
+- `reason`
+- `final_units`
+- recording-finalization fields
+
+Current worker event types include:
+
+- `session.ready`
+- `session.usage.tick`
+- `session.balance.low`
+- `session.balance.refilled`
+- `session.error`
+- `session.ended`
+- `session.recording.ready`
+
+The remaining sections in this document describe the older callback
+taxonomy that still exists only on the fallback path.
 
 ## Auth model
 
@@ -51,7 +92,7 @@ Response: { accepted: bool, stream_id?: string, project_id?: string, recording_e
 
 `accepted=false` is the expected response for unknown / wrong / already-ended keys.
 
-### `/internal/live/session-active`
+### Legacy `/internal/live/session-active`
 
 Worker reports first FFmpeg-produced output, opens the streaming
 reservation. Shell flips `media.live_streams.status` to `active`, sets
@@ -63,7 +104,7 @@ Request:  { stream_id: string, worker_url: string, started_at?: string (RFC3339)
 Response: { ok: true, reservation_id: string }
 ```
 
-### `/internal/live/session-tick`
+### Legacy `/internal/live/session-tick`
 
 Worker calls every `debit_cadence` (5s default) with the encoded-seconds
 delta. Shell decrements project balance, returns runway and grace
@@ -75,12 +116,10 @@ Request:  { stream_id: string, seq: int, debit_seconds: float, cumulative_second
 Response: { ok: true, balance_cents: int, runway_seconds: int, grace_triggered: bool }
 ```
 
-When `runway_seconds < runway_low_threshold` (30s default), the shell
-also fires `video.live_stream.runway_low`. `grace_triggered=true` means
-balance hit zero — worker should call `/topup` and / or start its grace
-deadline.
+In Pattern B, the worker no longer relies on this response to decide
+runtime continuation. Local receiver-side runway remains authoritative.
 
-### `/internal/live/session-ended`
+### Legacy `/internal/live/session-ended`
 
 Worker reports stream end + reason. Shell commits the streaming
 reservation with the final usage report, transitions the row to
@@ -93,11 +132,10 @@ Request:  { stream_id: string, reason: 'graceful' | 'insufficient_balance' | 'se
 Response: { ok: true, recording_processing: bool }
 ```
 
-If `recording_processing=true`, the worker should follow up with
-`/recording-finalized` once its `livecdn.Mirror` has flushed the final
-scan.
+In the current Pattern B direction, the worker instead emits
+`session.recording.ready` after final segment state is known.
 
-### `/internal/live/recording-finalized`
+### Legacy `/internal/live/recording-finalized`
 
 Worker reports the cumulative segment list once the bridge can take
 over. Shell delegates to `recordingFinalizer.finalize()`: server-side
@@ -114,7 +152,7 @@ Request:  { stream_id: string,
 Response: { ok: true, recording_asset_id: string }
 ```
 
-### `/internal/live/topup`
+### Legacy `/internal/live/topup`
 
 Worker requests authorization for an N-second runway top-up. Shell
 checks the project's prepaid balance: if sufficient, returns
@@ -127,8 +165,10 @@ Request:  { stream_id: string, request_seconds: int }
 Response: { succeeded: bool, authorized_cents: int, balance_cents: int }
 ```
 
-The actual `TopUpStreamingSession` gRPC call against payment-daemon
-happens worker-side after `succeeded:true`.
+The actual receiver-side topup/debit loop remains worker-side. In the
+current Pattern B direction, shells are moving toward minting payment
+and forwarding it to the worker’s canonical `/api/sessions/{gateway_session_id}/topup`
+route instead of authorizing a separate shell callback loop.
 
 ## Error codes
 
@@ -138,17 +178,15 @@ happens worker-side after `succeeded:true`.
 | `400` | malformed payload (zod parse failed) |
 | `401` | missing / wrong shared secret |
 | `404` | unknown `stream_id` |
-| `409` | state-mismatch (e.g., `/session-tick` on a non-active stream, `/recording-finalized` on a stream not in `recording_processing`) |
+| `409` | state mismatch on the legacy callback flow |
 | `500` | unexpected service error |
 
-The HTTP layer is in `apps/api/src/runtime/http/internal/live/index.ts`;
-business logic in `apps/api/src/service/live/liveSessionService.ts`. The
-worker-side client is `apps/transcode-worker-node/internal/providers/shellclient`.
+The worker-side client is `internal/providers/shellclient`.
 
 ## Cross-references
 
-- [`live-state-machine.md`](live-state-machine.md) — which transitions each callback maps to.
-- [`streaming-session-pattern.md`](streaming-session-pattern.md) — payment side of `/session-tick` and `/topup`.
+- [`live-state-machine.md`](live-state-machine.md) — legacy shell-state reference.
+- [`streaming-session-pattern.md`](streaming-session-pattern.md) — current worker-side live payment direction.
 - [`recording-bridge.md`](recording-bridge.md) — what `/recording-finalized` triggers.
 - [`ports-and-trust-boundaries.md`](ports-and-trust-boundaries.md) — auth model context.
 - Plan 0006 §B + §F — implementation plan.

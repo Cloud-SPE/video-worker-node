@@ -81,6 +81,9 @@ func TestFakeClose(t *testing.T) {
 	if err := f.CloseSession(context.Background(), nil, "w"); err != nil {
 		t.Fatal(err)
 	}
+	if f.CloseCount("w") != 2 {
+		t.Fatalf("CloseCount=%d want 2", f.CloseCount("w"))
+	}
 }
 
 func TestSentinels(t *testing.T) {

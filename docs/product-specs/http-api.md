@@ -24,14 +24,17 @@ shell is the only intended client.
 | POST | `/v1/video/transcode/abr` | `ABRSubmitRequest` | per-rendition encode + master HLS; paid via `livepeer-payment` header |
 | POST | `/v1/video/transcode/abr/status` | `{ job_id }` | poll job |
 
-## Live (RTMP-based; new shape per plan 0002)
+## Live (RTMP-based; Pattern B session surface)
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/stream/start` | `StreamStartRequest` (`stream_id` or `work_id`, preset; no Channel fields) | operator pre-registration; accepts `livepeer-payment` header and still tolerates body `payment_ticket` during transition |
-| POST | `/stream/stop` | `{ stream_id }` | graceful close; `work_id` also accepted for compatibility |
-| POST | `/stream/topup` | `{ stream_id }` + payment | extend session balance; accepts header and body ticket |
-| POST | `/stream/status` | `{ stream_id }` | snapshot stream state; `work_id` also accepted for compatibility |
+| POST | `/api/sessions/start` | `SessionStartRequest` (`gateway_session_id`, optional `preset`) | canonical worker session-open route; requires `livepeer-payment` header; credits receiver-side balance and returns `worker_session_id` + `work_id` |
+| POST | `/api/sessions/{gateway_session_id}/topup` | payment only | canonical worker session-topup route; requires `livepeer-payment` header; applies credit to the existing live `work_id` |
+| POST | `/api/sessions/{gateway_session_id}/end` | — | canonical graceful end route; closes the receiver-side payment session and stops the worker-owned live session |
+| POST | `/stream/start` | `StreamStartRequest` (`stream_id` or `work_id`, preset; no Channel fields) | legacy worker live route retained during the rewrite; not the long-term contract |
+| POST | `/stream/stop` | `{ stream_id }` | legacy worker live route retained during the rewrite |
+| POST | `/stream/topup` | `{ stream_id }` + payment | legacy worker live route retained during the rewrite |
+| POST | `/stream/status` | `{ stream_id }` | legacy worker live route retained during the rewrite; returns the persisted `types.Stream` record, including Pattern B correlation/runtime fields such as `gateway_session_id`, `worker_session_id`, `payment_work_id`, `low_balance`, and `grace_until` when present |
 
 ## Health + diagnostics
 
@@ -53,10 +56,12 @@ Paid VOD / ABR endpoints require a base64-encoded `livepeer-payment`
 header carrying `livepeer.payments.v1.Payment` bytes. The worker
 validates that payload against `payment-daemon` via `ProcessPayment`.
 
-Live mode's `/stream/start` and `/stream/topup` paths accept the same
-header and still tolerate body `payment_ticket` as a compatibility
-alias while callers migrate. Worker-side implementation lives in
-`internal/service/liverunner/`.
+Canonical live session routes use the `livepeer-payment` header and do
+not require a JSON `payment_ticket` alias. During the worker rewrite,
+the older `/stream/start` and `/stream/topup` routes still tolerate body
+`payment_ticket` while callers migrate. Worker-side implementation lives
+in `internal/service/liverunner/` plus the HTTP session route layer in
+`internal/runtime/http/`.
 
 `POST /v1/payment/ticket-params` is unpaid. It does not size work or
 create a payment. The caller supplies the exact `face_value_wei`, and

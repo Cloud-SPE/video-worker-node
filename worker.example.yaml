@@ -26,7 +26,7 @@ payment_daemon:
   broker:
     mode: ethereum
     rpc_url: "https://arb1.arbitrum.io/rpc"
-    ticket_broker_contract: "0xa8bB618B1520E284046F3dFc448851A1Ff26e41B"
+    ticket_broker_contract: "0xa15bb66138824a1c7167f5e85b957d04dd34e468"
     # Dev example:
     # mode: fake
     # fake_sender_balances_wei:

@@ -1,7 +1,7 @@
 ---
 title: Live RTMP protocol (replaces source's live-trickle-protocol)
 status: drafted
-last-reviewed: 2026-04-26
+last-reviewed: 2026-05-02
 ---
 
 # Live RTMP protocol
@@ -10,6 +10,12 @@ last-reviewed: 2026-04-26
 > `internal/providers/ingest/rtmp/` (RTMP server, stream-key extraction,
 > SessionAcceptor) and `internal/service/liverunner/` (state machine + payment loop).
 > The code is the source of truth; this doc captures the design rationale.
+>
+> **Transition note**: RTMP admission is still validated with
+> `POST /internal/live/validate-key`, but the live runtime is moving to
+> Pattern B. The worker's canonical control/payment surface is now
+> `/api/sessions/*`, and worker lifecycle/accounting updates are
+> converging on `POST /internal/live/events`.
 
 ## What this replaces
 
@@ -41,8 +47,8 @@ worker providers/ingest/rtmp/
   │      ↑ shell hashes stream_key, looks up media.live_streams.stream_key_hash
   │      ↑ returns { accepted: true, stream_id, project_id, ... } or rejects
   │
-  ├──▶ payment-daemon.OpenStreamingSession (gRPC unix)
-  │      ↑ pre-credits 60s of runway
+  ├──▶ worker session already pre-opened via POST /api/sessions/start
+  │      ↑ worker has already processed initial payment credit
   │
   ▼
 liverunner spawns FFmpeg with input = pipe:0 (FLV from ingest session)
@@ -87,8 +93,10 @@ validates inline.
 
 When the broadcaster disconnects or the runner force-closes:
 - FFmpeg subprocess exits cleanly (or is SIGTERM/SIGKILL'd).
-- Worker calls shell `/internal/live/recording-finalized` with the segment list.
-- Shell creates a `media.assets` row and runs the recording bridge.
+- Worker emits `session.ended`.
+- If recording is enabled and finalization succeeds, worker emits
+  `session.recording.ready` with the segment list and master key.
+- Shell/gateway creates a `media.assets` row and runs the recording bridge.
 
 Detail: [`recording-bridge.md`](recording-bridge.md).
 
@@ -96,5 +104,5 @@ Detail: [`recording-bridge.md`](recording-bridge.md).
 
 - [`ingest-interface.md`](ingest-interface.md) — the abstraction the RTMP impl satisfies
 - [`streaming-session-live-mode.md`](streaming-session-live-mode.md) — payment-side details
-- [`internal-callback-api.md`](internal-callback-api.md) — the worker → shell callback API
-- [`live-state-machine.md`](live-state-machine.md) — live session state transitions
+- [`internal-callback-api.md`](internal-callback-api.md) — transitional callback reference; Pattern B event-ingest direction is documented there
+- [`live-state-machine.md`](live-state-machine.md) — legacy shell-state reference

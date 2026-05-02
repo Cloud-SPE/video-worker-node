@@ -1,7 +1,16 @@
 // Package liverunner implements the live HLS state machine the worker
 // runs per accepted RTMP session.
 //
-// Lifecycle (per stream):
+// Transition note:
+//   - Pattern B sessions are pre-opened through the worker's
+//     /api/sessions/* routes, use receiver-side debit/runway checks, and
+//     emit typed worker events back to the gateway.
+//   - Legacy sessions still validate via stream key and continue to use
+//     the older session-active/session-tick/session-ended callbacks
+//     until the gateway rewrite removes that path.
+//
+// Lifecycle (per stream, legacy callback nomenclature shown where it
+// still applies):
 //
 //	NEW ──validate-key──▶ VALIDATED ──session-active──▶ STREAMING ──┐
 //	                                                                │
@@ -13,20 +22,20 @@
 // The runner satisfies `ingest.SessionAcceptor` so the RTMP provider can
 // hand it freshly-arrived broadcaster sessions. Each accepted session
 // gets its own goroutine that:
-//   - calls shell `validate-key`; rejects on failure
-//   - calls shell `session-active`; opens the streaming-session reservation
+//   - validates the stream key unless the session was pre-opened through
+//     the Pattern B /api/sessions/start flow
+//   - activates legacy shell state only on the fallback path
 //   - spawns the encoder (§D plugs in the real FFmpeg one)
-//   - ticks shell `session-tick` at DebitCadence with the encoder's
-//     reported encoded seconds
-//   - watches runway; calls shell `topup` when below threshold
-//   - on encoder exit / ctx cancel: calls `session-ended`
-//   - on graceful close with recording_enabled: reads the per-session
+//   - either debits receiver-side balance locally and emits typed events
+//     (Pattern B) or ticks the shell directly (legacy)
+//   - on encoder exit / ctx cancel: emits/records terminal state
+//   - on graceful close with recording enabled: reads the per-session
 //     `livecdn.Mirror.Segments()` (populated by §E's manifest writer)
-//     and posts to `/internal/live/recording-finalized` so the shell's
-//     bridge service produces a VOD asset.
+//     and emits recording-ready state.
 //
 // State persists into BoltDB via `repo/jobs.SaveStream` so a worker
-// restart resumes the correct DebitSeq.
+// restart resumes the correct DebitSeq. First-cut Pattern B still treats
+// restart as a terminal event rather than migrating the session.
 package liverunner
 
 import (
@@ -34,6 +43,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -125,12 +135,14 @@ type Config struct {
 // IngestProvider). Bodies opened via Start are assumed pre-validated
 // and skip the validate-key callback.
 type StartRequest struct {
-	WorkID        string
-	Sender        []byte
-	PaymentTicket []byte
-	Preset        string
-	WebhookURL    string
-	WebhookSecret string
+	WorkID          string
+	Sender          []byte
+	PaymentTicket   []byte
+	PaymentWorkID   string
+	WorkerSessionID string
+	Preset          string
+	WebhookURL      string
+	WebhookSecret   string
 }
 
 // Runner manages all live streams.
@@ -142,19 +154,26 @@ type Runner struct {
 }
 
 type streamCtl struct {
-	stream  types.Stream
-	cancel  context.CancelFunc
-	encoder Encoder
-	mirror  *livecdn.Mirror
-	done    chan struct{}
-	mu      sync.Mutex
-	reason  string
+	stream          types.Stream
+	cancel          context.CancelFunc
+	encoder         Encoder
+	mirror          *livecdn.Mirror
+	done            chan struct{}
+	patternBSender  []byte
+	patternBWorkID  string
+	workerSessionID string
+	usePatternB     bool
+	mu              sync.Mutex
+	reason          string
 }
+
+const workerEventPostAttempts = 3
 
 const (
 	sessionEndReasonGraceful            = "graceful"
 	sessionEndReasonInsufficientBalance = "insufficient_balance"
 	sessionEndReasonWorkerFailed        = "session_worker_failed"
+	sessionEndReasonPaymentFailed       = "payment_path_failed"
 	sessionEndReasonAdminStop           = "admin_stop"
 )
 
@@ -183,8 +202,10 @@ func terminationReasonPriority(reason string) int {
 		return 2
 	case sessionEndReasonInsufficientBalance:
 		return 3
-	case sessionEndReasonWorkerFailed:
+	case sessionEndReasonPaymentFailed:
 		return 4
+	case sessionEndReasonWorkerFailed:
+		return 5
 	default:
 		return 0
 	}
@@ -270,24 +291,36 @@ func (r *Runner) Accept(ctx context.Context, sess ingest.IngestSession) (ingest.
 		return ingest.Acceptance{}, ingest.ErrStreamKeyInvalid
 	}
 
-	// 2. session-active.
 	startedAt := r.cfg.NowFn()
-	active, err := r.cfg.Shell.SessionActive(ctx, shellclient.SessionActiveInput{
-		StreamID:  validate.StreamID,
-		WorkerURL: r.cfg.WorkerURL,
-		StartedAt: startedAt,
-	})
-	if err != nil {
-		return ingest.Acceptance{}, fmt.Errorf("session-active: %w", err)
+	r.mu.Lock()
+	ctl, hasPendingSession := r.streams[validate.StreamID]
+	r.mu.Unlock()
+
+	var active shellclient.SessionActiveResult
+	if !hasPendingSession || !ctl.usePatternB {
+		active, err = r.cfg.Shell.SessionActive(ctx, shellclient.SessionActiveInput{
+			StreamID:  validate.StreamID,
+			WorkerURL: r.cfg.WorkerURL,
+			StartedAt: startedAt,
+		})
+		if err != nil {
+			return ingest.Acceptance{}, fmt.Errorf("session-active: %w", err)
+		}
 	}
 
 	// 3. Persist the worker-side stream record.
 	stream := types.Stream{
-		WorkID:     validate.StreamID,
-		Phase:      types.StreamPhaseStreaming,
-		Preset:     r.cfg.LivePreset,
-		StartedAt:  startedAt,
-		PublishURL: sess.RemoteAddr(),
+		WorkID:           validate.StreamID,
+		GatewaySessionID: validate.StreamID,
+		Phase:            types.StreamPhaseStreaming,
+		Preset:           r.cfg.LivePreset,
+		StartedAt:        startedAt,
+		PublishURL:       sess.RemoteAddr(),
+	}
+	if hasPendingSession {
+		stream.WorkerSessionID = ctl.workerSessionID
+		stream.PaymentWorkID = ctl.patternBWorkID
+		stream.Sender = append([]byte(nil), ctl.patternBSender...)
 	}
 	if r.cfg.Repo != nil {
 		if err := r.cfg.Repo.SaveStream(ctx, stream); err != nil {
@@ -320,20 +353,36 @@ func (r *Runner) Accept(ctx context.Context, sess ingest.IngestSession) (ingest.
 		}
 	}
 
-	ctl := &streamCtl{
-		stream: stream, cancel: cancel, encoder: enc, mirror: mirror, done: make(chan struct{}),
-		reason: sessionEndReasonGraceful,
+	if !hasPendingSession {
+		ctl = &streamCtl{reason: sessionEndReasonGraceful}
+	}
+	ctl.stream = stream
+	ctl.cancel = cancel
+	ctl.encoder = enc
+	ctl.mirror = mirror
+	ctl.done = make(chan struct{})
+	if ctl.reason == "" {
+		ctl.reason = sessionEndReasonGraceful
 	}
 
 	r.mu.Lock()
 	r.streams[validate.StreamID] = ctl
 	r.mu.Unlock()
 
-	r.cfg.Logger.Info("liverunner.session_active",
-		"stream_id", validate.StreamID,
-		"reservation_id", active.ReservationID,
-		"recording_enabled", validate.RecordingEnabled,
-	)
+	if ctl.usePatternB {
+		r.cfg.Logger.Info("liverunner.session_ready",
+			"stream_id", validate.StreamID,
+			"worker_session_id", ctl.workerSessionID,
+			"work_id", ctl.patternBWorkID,
+			"recording_enabled", validate.RecordingEnabled,
+		)
+	} else {
+		r.cfg.Logger.Info("liverunner.session_active",
+			"stream_id", validate.StreamID,
+			"reservation_id", active.ReservationID,
+			"recording_enabled", validate.RecordingEnabled,
+		)
+	}
 
 	go r.runSession(streamCtx, ctl, sess, validate)
 
@@ -402,8 +451,8 @@ func (r *Runner) runSession(
 		lastDebited   float64
 		seq           uint64
 		graceDeadline time.Time // zero = not in grace
-		lastTopupAt   time.Time
 		closeReason   = sessionEndReasonGraceful
+		inLowBalance  bool
 	)
 
 	if r.cfg.Repo != nil {
@@ -414,12 +463,152 @@ func (r *Runner) runSession(
 		}
 	}
 
+	emitEvent := func(callCtx context.Context, in shellclient.WorkerEventInput) {
+		if r.cfg.Shell == nil {
+			return
+		}
+		in.GatewaySessionID = v.StreamID
+		in.OccurredAt = r.cfg.NowFn()
+		if ctl.usePatternB {
+			in.WorkerSessionID = ctl.workerSessionID
+			in.WorkID = ctl.patternBWorkID
+		}
+		var lastErr error
+		for attempt := 1; attempt <= workerEventPostAttempts; attempt++ {
+			if err := r.cfg.Shell.PostEvent(callCtx, in); err == nil {
+				return
+			} else {
+				lastErr = err
+			}
+			if attempt == workerEventPostAttempts || callCtx.Err() != nil {
+				break
+			}
+			r.cfg.SleepFn(r.cfg.DebitRetryBackoff)
+		}
+		if lastErr != nil {
+			r.cfg.Logger.Warn("liverunner.event_post_failed",
+				"stream_id", v.StreamID,
+				"type", in.Type,
+				"attempts", workerEventPostAttempts,
+				"err", lastErr,
+			)
+		}
+	}
+
+	if ctl.usePatternB {
+		emitEvent(ctx, shellclient.WorkerEventInput{
+			Type: "session.ready",
+		})
+	}
+
+	persistStreamUpdate := func(callCtx context.Context, apply func(*types.Stream)) {
+		ctl.stream.UpdatedAt = r.cfg.NowFn()
+		apply(&ctl.stream)
+		if r.cfg.Repo != nil {
+			if cur, err := r.cfg.Repo.GetStream(callCtx, v.StreamID); err == nil {
+				apply(&cur)
+				_ = r.cfg.Repo.SaveStream(callCtx, cur)
+			}
+		}
+	}
+
 	tickAndDecide := func() (closeNow bool, reason string) {
 		encoded := ctl.encoder.EncodedSeconds()
 		debit := encoded - lastDebited
 		if debit < 0 {
 			debit = 0
 		}
+		if ctl.usePatternB {
+			units := int64(0)
+			if debit > 0 {
+				units = int64(math.Ceil(debit))
+			}
+			if units > 0 {
+				seq++
+				if r.cfg.Repo != nil {
+					_, _ = r.cfg.Repo.IncrementDebitSeq(ctx, v.StreamID)
+				}
+				if _, err := r.cfg.Payment.DebitBalance(ctx, ctl.patternBSender, ctl.patternBWorkID, units, seq); err != nil {
+					persistStreamUpdate(ctx, func(stream *types.Stream) {
+						stream.Phase = types.StreamPhasePaymentLost
+						stream.ErrorCode = sessionEndReasonPaymentFailed
+					})
+					emitEvent(ctx, shellclient.WorkerEventInput{
+						Type:        "session.error",
+						Reason:      sessionEndReasonPaymentFailed,
+						Message:     err.Error(),
+						Recoverable: false,
+					})
+					return true, sessionEndReasonPaymentFailed
+				}
+				lastDebited = encoded
+				ok, err := r.cfg.Payment.SufficientBalance(ctx, ctl.patternBSender, ctl.patternBWorkID, int64(r.cfg.RunwaySeconds))
+				if err != nil {
+					persistStreamUpdate(ctx, func(stream *types.Stream) {
+						stream.Phase = types.StreamPhasePaymentLost
+						stream.ErrorCode = sessionEndReasonPaymentFailed
+					})
+					emitEvent(ctx, shellclient.WorkerEventInput{
+						Type:        "session.error",
+						Reason:      sessionEndReasonPaymentFailed,
+						Message:     err.Error(),
+						Recoverable: false,
+					})
+					return true, sessionEndReasonPaymentFailed
+				}
+				remainingRunway := int64(0)
+				if ok {
+					remainingRunway = int64(r.cfg.RunwaySeconds)
+				}
+				emitEvent(ctx, shellclient.WorkerEventInput{
+					Type:            "session.usage.tick",
+					UsageSeq:        seq,
+					Units:           units,
+					UnitType:        "seconds",
+					RemainingRunway: remainingRunway,
+					LowBalance:      !ok,
+				})
+				if !ok {
+					if !inLowBalance {
+						inLowBalance = true
+						if graceDeadline.IsZero() {
+							graceDeadline = r.cfg.NowFn().Add(time.Duration(r.cfg.GraceSeconds) * time.Second)
+						}
+						persistStreamUpdate(ctx, func(stream *types.Stream) {
+							stream.Phase = types.StreamPhaseLowBalance
+							stream.LowBalance = true
+							stream.GraceUntil = graceDeadline
+							stream.ErrorCode = ""
+						})
+						emitEvent(ctx, shellclient.WorkerEventInput{
+							Type:            "session.balance.low",
+							RemainingRunway: remainingRunway,
+							LowBalance:      true,
+						})
+					}
+					if r.cfg.NowFn().After(graceDeadline) {
+						return true, sessionEndReasonInsufficientBalance
+					}
+				} else {
+					if inLowBalance {
+						inLowBalance = false
+						persistStreamUpdate(ctx, func(stream *types.Stream) {
+							stream.Phase = types.StreamPhaseStreaming
+							stream.LowBalance = false
+							stream.GraceUntil = time.Time{}
+							stream.ErrorCode = ""
+						})
+						emitEvent(ctx, shellclient.WorkerEventInput{
+							Type:            "session.balance.refilled",
+							RemainingRunway: remainingRunway,
+						})
+					}
+					graceDeadline = time.Time{}
+				}
+			}
+			return false, ""
+		}
+
 		seq++
 		if r.cfg.Repo != nil {
 			_, _ = r.cfg.Repo.IncrementDebitSeq(ctx, v.StreamID)
@@ -433,34 +622,9 @@ func (r *Runner) runSession(
 		if err != nil {
 			r.cfg.Logger.Warn("liverunner.tick_failed",
 				"stream_id", v.StreamID, "seq", seq, "err", err)
-			// Don't immediately close on a single failed tick — could
-			// be transient. Persist the seq locally; next tick retries.
 			return false, ""
 		}
 		lastDebited = encoded
-
-		// Runway watermark.
-		if tickRes.RunwaySeconds <= int64(r.cfg.RunwaySeconds) && time.Since(lastTopupAt) >= r.cfg.TopupMinInterval {
-			topup, terr := r.cfg.Shell.Topup(ctx, shellclient.TopupInput{
-				StreamID:       v.StreamID,
-				RequestSeconds: int64(r.cfg.PreCreditSeconds),
-			})
-			lastTopupAt = r.cfg.NowFn()
-			if terr != nil {
-				r.cfg.Logger.Warn("liverunner.topup_failed",
-					"stream_id", v.StreamID, "err", terr)
-			} else if !topup.Succeeded {
-				r.cfg.Logger.Warn("liverunner.topup_denied",
-					"stream_id", v.StreamID, "balance_cents", topup.BalanceCents)
-				if graceDeadline.IsZero() {
-					graceDeadline = r.cfg.NowFn().Add(time.Duration(r.cfg.GraceSeconds) * time.Second)
-				}
-			} else {
-				graceDeadline = time.Time{}
-			}
-		}
-
-		// Grace expiry → fatal close.
 		if tickRes.GraceTriggered {
 			if graceDeadline.IsZero() {
 				graceDeadline = r.cfg.NowFn().Add(time.Duration(r.cfg.GraceSeconds) * time.Second)
@@ -468,10 +632,35 @@ func (r *Runner) runSession(
 			if r.cfg.NowFn().After(graceDeadline) {
 				return true, sessionEndReasonInsufficientBalance
 			}
-		} else {
-			// Balance recovered (e.g., topup succeeded). Clear grace.
-			if !graceDeadline.IsZero() && tickRes.RunwaySeconds > int64(r.cfg.RunwaySeconds) {
-				graceDeadline = time.Time{}
+		} else if !graceDeadline.IsZero() && tickRes.RunwaySeconds > int64(r.cfg.RunwaySeconds) {
+			graceDeadline = time.Time{}
+		}
+		if tickRes.RunwaySeconds <= int64(r.cfg.RunwaySeconds) {
+			lastTopupAt := ctl.stream.LastTopupAt
+			if lastTopupAt.IsZero() || r.cfg.NowFn().Sub(lastTopupAt) >= r.cfg.TopupMinInterval {
+				topupRes, err := r.cfg.Shell.Topup(ctx, shellclient.TopupInput{
+					StreamID:       v.StreamID,
+					RequestSeconds: int64(r.cfg.PreCreditSeconds),
+				})
+				if err != nil {
+					r.cfg.Logger.Warn("liverunner.topup_failed",
+						"stream_id", v.StreamID, "err", err)
+				} else {
+					ctl.stream.LastTopupAt = r.cfg.NowFn()
+					if r.cfg.Repo != nil {
+						if cur, gerr := r.cfg.Repo.GetStream(ctx, v.StreamID); gerr == nil {
+							cur.LastTopupAt = ctl.stream.LastTopupAt
+							_ = r.cfg.Repo.SaveStream(ctx, cur)
+						}
+					}
+					if !topupRes.Succeeded {
+						r.cfg.Logger.Warn("liverunner.topup_declined",
+							"stream_id", v.StreamID,
+							"authorized_cents", topupRes.AuthorizedCents,
+							"balance_cents", topupRes.BalanceCents,
+						)
+					}
+				}
 			}
 		}
 		return false, ""
@@ -516,24 +705,57 @@ end:
 	defer cancelFinal()
 
 	finalEncoded := ctl.encoder.EncodedSeconds()
-	finalDebit := finalEncoded - lastDebited
-	if finalDebit > 0 {
-		seq++
-		_, _ = r.cfg.Shell.SessionTick(finalCtx, shellclient.SessionTickInput{
-			StreamID: v.StreamID, Seq: seq,
-			DebitSeconds: finalDebit, CumulativeSeconds: finalEncoded,
+	var endResp shellclient.SessionEndedResult
+	if ctl.usePatternB {
+		finalDebit := finalEncoded - lastDebited
+		if finalDebit > 0 {
+			units := int64(math.Ceil(finalDebit))
+			seq++
+			if r.cfg.Repo != nil {
+				_, _ = r.cfg.Repo.IncrementDebitSeq(finalCtx, v.StreamID)
+			}
+			if _, err := r.cfg.Payment.DebitBalance(finalCtx, ctl.patternBSender, ctl.patternBWorkID, units, seq); err == nil {
+				emitEvent(finalCtx, shellclient.WorkerEventInput{
+					Type:            "session.usage.tick",
+					UsageSeq:        seq,
+					Units:           units,
+					UnitType:        "seconds",
+					RemainingRunway: 0,
+					LowBalance:      closeReason == sessionEndReasonInsufficientBalance,
+				})
+			}
+		}
+		emitEvent(finalCtx, shellclient.WorkerEventInput{
+			Type:       "session.ended",
+			Reason:     closeReason,
+			FinalUnits: int64(finalEncoded),
 		})
-	}
+		if err := r.cfg.Payment.CloseSession(finalCtx, ctl.patternBSender, ctl.patternBWorkID); err != nil {
+			r.cfg.Logger.Warn("liverunner.close_session_failed",
+				"stream_id", v.StreamID, "work_id", ctl.patternBWorkID, "err", err)
+		}
+		endResp = shellclient.SessionEndedResult{RecordingProcessing: v.RecordingEnabled}
+	} else {
+		finalDebit := finalEncoded - lastDebited
+		if finalDebit > 0 {
+			seq++
+			_, _ = r.cfg.Shell.SessionTick(finalCtx, shellclient.SessionTickInput{
+				StreamID: v.StreamID, Seq: seq,
+				DebitSeconds: finalDebit, CumulativeSeconds: finalEncoded,
+			})
+		}
 
-	endResp, err := r.cfg.Shell.SessionEnded(finalCtx, shellclient.SessionEndedInput{
-		StreamID:     v.StreamID,
-		Reason:       closeReason,
-		FinalSeq:     seq,
-		FinalSeconds: finalEncoded,
-	})
-	if err != nil {
-		r.cfg.Logger.Warn("liverunner.session_ended_failed",
-			"stream_id", v.StreamID, "err", err)
+		var err error
+		endResp, err = r.cfg.Shell.SessionEnded(finalCtx, shellclient.SessionEndedInput{
+			StreamID:     v.StreamID,
+			Reason:       closeReason,
+			FinalSeq:     seq,
+			FinalSeconds: finalEncoded,
+		})
+		if err != nil {
+			r.cfg.Logger.Warn("liverunner.session_ended_failed",
+				"stream_id", v.StreamID, "err", err)
+		}
 	}
 
 	// Persist terminal phase.
@@ -550,6 +772,8 @@ end:
 			cur.UnitsDebited = int64(finalEncoded)
 			cur.CloseReason = closeReason
 			cur.DebitSeq = seq
+			cur.LowBalance = false
+			cur.GraceUntil = time.Time{}
 			_ = r.cfg.Repo.SaveStream(finalCtx, cur)
 		}
 	}
@@ -564,21 +788,30 @@ end:
 	// the shell's stale-stream sweeper eventually times the row out.
 	if endResp.RecordingProcessing && v.RecordingEnabled && ctl.mirror != nil {
 		segs := ctl.mirror.Segments()
-		_, ferr := r.cfg.Shell.RecordingFinalized(finalCtx, shellclient.RecordingFinalizedInput{
-			StreamID:           v.StreamID,
-			SegmentStorageKeys: segs,
-			MasterStorageKey:   ctl.mirror.MasterKey(),
-			TotalDurationSec:   finalEncoded,
-		})
-		if ferr != nil {
-			r.cfg.Logger.Warn("liverunner.recording_finalized_failed",
-				"stream_id", v.StreamID, "err", ferr)
+		if ctl.usePatternB {
+			emitEvent(finalCtx, shellclient.WorkerEventInput{
+				Type:                "session.recording.ready",
+				MasterStorageKey:    ctl.mirror.MasterKey(),
+				SegmentStorageKeys:  segs,
+				TotalDurationSecond: finalEncoded,
+			})
 		} else {
-			r.cfg.Logger.Info("liverunner.recording_finalized",
-				"stream_id", v.StreamID,
-				"segment_count", len(segs),
-				"total_seconds", finalEncoded,
-			)
+			_, ferr := r.cfg.Shell.RecordingFinalized(finalCtx, shellclient.RecordingFinalizedInput{
+				StreamID:           v.StreamID,
+				SegmentStorageKeys: segs,
+				MasterStorageKey:   ctl.mirror.MasterKey(),
+				TotalDurationSec:   finalEncoded,
+			})
+			if ferr != nil {
+				r.cfg.Logger.Warn("liverunner.recording_finalized_failed",
+					"stream_id", v.StreamID, "err", ferr)
+			} else {
+				r.cfg.Logger.Info("liverunner.recording_finalized",
+					"stream_id", v.StreamID,
+					"segment_count", len(segs),
+					"total_seconds", finalEncoded,
+				)
+			}
 		}
 	} else if endResp.RecordingProcessing && v.RecordingEnabled {
 		r.cfg.Logger.Info("liverunner.recording_processing_no_mirror",
@@ -605,13 +838,29 @@ func (r *Runner) Start(ctx context.Context, req StartRequest) (types.Stream, err
 		return types.Stream{}, fmt.Errorf("liverunner: stream %s already started", req.WorkID)
 	}
 	stream := types.Stream{
-		WorkID:    req.WorkID,
-		Phase:     types.StreamPhaseStarting,
-		Preset:    req.Preset,
-		StartedAt: r.cfg.NowFn(),
+		WorkID:           req.WorkID,
+		GatewaySessionID: req.WorkID,
+		WorkerSessionID:  req.WorkerSessionID,
+		PaymentWorkID:    req.PaymentWorkID,
+		Sender:           append([]byte(nil), req.Sender...),
+		Phase:            types.StreamPhaseStarting,
+		Preset:           req.Preset,
+		StartedAt:        r.cfg.NowFn(),
+	}
+	if r.cfg.Repo != nil {
+		if err := r.cfg.Repo.SaveStream(ctx, stream); err != nil {
+			return types.Stream{}, fmt.Errorf("persist stream: %w", err)
+		}
 	}
 	_, cancel := context.WithCancel(ctx)
-	r.streams[req.WorkID] = &streamCtl{stream: stream, cancel: cancel}
+	r.streams[req.WorkID] = &streamCtl{
+		stream:          stream,
+		cancel:          cancel,
+		patternBSender:  append([]byte(nil), req.Sender...),
+		patternBWorkID:  req.PaymentWorkID,
+		workerSessionID: req.WorkerSessionID,
+		usePatternB:     req.PaymentWorkID != "" && len(req.Sender) > 0,
+	}
 	return stream, nil
 }
 
@@ -626,6 +875,12 @@ func (r *Runner) Stop(_ context.Context, workID string) error {
 	}
 	if ctl.done == nil {
 		// Legacy path: no goroutine to wait on, remove inline.
+		ctl.stream.Phase = types.StreamPhaseClosed
+		ctl.stream.CloseReason = sessionEndReasonAdminStop
+		ctl.stream.ClosedAt = r.cfg.NowFn()
+		if r.cfg.Repo != nil {
+			_ = r.cfg.Repo.SaveStream(context.Background(), ctl.stream)
+		}
 		delete(r.streams, workID)
 	}
 	r.mu.Unlock()
@@ -641,7 +896,18 @@ func (r *Runner) Stop(_ context.Context, workID string) error {
 // Topup is invoked by the operator HTTP/gRPC surface; the shell's
 // /internal/live/topup is the canonical path. Retained as a no-op so
 // existing routes keep compiling.
-func (r *Runner) Topup(_ context.Context, _ string, _ []byte) error {
+func (r *Runner) Topup(ctx context.Context, workID string, _ []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ctl, ok := r.streams[workID]; ok {
+		ctl.stream.LastTopupAt = r.cfg.NowFn()
+		if r.cfg.Repo != nil {
+			if cur, err := r.cfg.Repo.GetStream(ctx, workID); err == nil {
+				cur.LastTopupAt = ctl.stream.LastTopupAt
+				_ = r.cfg.Repo.SaveStream(ctx, cur)
+			}
+		}
+	}
 	return nil
 }
 

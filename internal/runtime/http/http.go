@@ -11,6 +11,7 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -22,6 +23,7 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/Cloud-SPE/video-worker-node/internal/config"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
@@ -64,6 +66,7 @@ type Server struct {
 	publicRTMP         string
 	maxConc            int
 	registryCaps       []config.RegistryCapability
+	liveSessions       *liveSessionRegistry
 }
 
 // Config wires the Server.
@@ -111,6 +114,7 @@ func New(cfg Config) (*Server, error) {
 		publicRTMP:         cfg.PublicRTMPURL,
 		maxConc:            cfg.MaxConcurrent,
 		registryCaps:       cloneRegistryCapabilities(cfg.RegistryCapabilities),
+		liveSessions:       newLiveSessionRegistry(),
 	}, nil
 }
 
@@ -126,6 +130,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/video/transcode/status", s.handleVODStatus)
 	mux.HandleFunc("POST /v1/video/transcode/abr", s.handleABRSubmit)
 	mux.HandleFunc("POST /v1/video/transcode/abr/status", s.handleABRStatus)
+	mux.HandleFunc("POST /api/sessions/start", s.handleSessionStart)
+	mux.HandleFunc("POST /api/sessions/{gateway_session_id}/topup", s.handleSessionTopup)
+	mux.HandleFunc("POST /api/sessions/{gateway_session_id}/end", s.handleSessionEnd)
 	mux.HandleFunc("POST /stream/start", s.handleStreamStart)
 	mux.HandleFunc("POST /stream/stop", s.handleStreamStop)
 	mux.HandleFunc("POST /stream/topup", s.handleStreamTopup)
@@ -471,6 +478,37 @@ type StreamStartRequest struct {
 	PaymentTicket string `json:"payment_ticket,omitempty"`
 }
 
+type SessionStartRequest struct {
+	GatewaySessionID string `json:"gateway_session_id,omitempty"`
+	SessionID        string `json:"session_id,omitempty"`
+	Preset           string `json:"preset,omitempty"`
+	WebhookURL       string `json:"webhook_url,omitempty"`
+	WebhookSecret    string `json:"webhook_secret,omitempty"`
+}
+
+type SessionStartResponse struct {
+	Status           string       `json:"status"`
+	GatewaySessionID string       `json:"gateway_session_id"`
+	WorkerSessionID  string       `json:"worker_session_id"`
+	WorkID           string       `json:"work_id"`
+	RTMPURL          string       `json:"rtmp_url,omitempty"`
+	Stream           types.Stream `json:"stream"`
+}
+
+type SessionTopupResponse struct {
+	Status           string `json:"status"`
+	GatewaySessionID string `json:"gateway_session_id"`
+	WorkerSessionID  string `json:"worker_session_id"`
+	WorkID           string `json:"work_id"`
+}
+
+type SessionEndResponse struct {
+	Status           string `json:"status"`
+	GatewaySessionID string `json:"gateway_session_id"`
+	WorkerSessionID  string `json:"worker_session_id"`
+	WorkID           string `json:"work_id"`
+}
+
 // StreamStartResponse returns the RTMP URL the broadcaster should connect to.
 type StreamStartResponse struct {
 	WorkID   string       `json:"work_id,omitempty"`
@@ -531,6 +569,88 @@ func (s *Server) handleStreamStart(w http.ResponseWriter, r *http.Request) {
 		StreamID: workID,
 		RTMPURL:  s.publicRTMP,
 		Stream:   stream,
+	})
+}
+
+func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
+	if !s.mode.IsLive() {
+		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
+		return
+	}
+	var req SessionStartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
+		return
+	}
+	gatewaySessionID := firstNonEmpty(req.GatewaySessionID, req.SessionID)
+	if gatewaySessionID == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "gateway_session_id or session_id is required")
+		return
+	}
+	if s.liveRunner == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_runner", "live runner is not wired")
+		return
+	}
+	if s.payment == nil && !s.dev {
+		writeError(w, http.StatusServiceUnavailable, "payment_unavailable", "payment broker is not wired")
+		return
+	}
+	preset := req.Preset
+	if preset == "" {
+		preset = "h264-live"
+	}
+	ticket, code, err := s.decodeRequestPayment(r, "", s.payment != nil && !s.dev)
+	if err != nil {
+		if code == http.StatusPaymentRequired {
+			writeError(w, code, "payment", "missing payment ticket")
+			return
+		}
+		writeError(w, code, "bad_ticket", err.Error())
+		return
+	}
+	workID := deriveSessionWorkID(ticket)
+	workerSessionID := deriveWorkerSessionID(workID)
+	var sender []byte
+	if s.payment != nil && !s.dev {
+		receipt, err := s.payment.ProcessPayment(r.Context(), ticket, workID)
+		if err != nil {
+			writeError(w, http.StatusPaymentRequired, types.ErrCodeInvalidPayment, err.Error())
+			return
+		}
+		sender = append([]byte(nil), receipt.Sender...)
+	}
+	stream, err := s.liveRunner.Start(r.Context(), liverunner.StartRequest{
+		WorkID:          gatewaySessionID,
+		Sender:          sender,
+		PaymentTicket:   ticket,
+		PaymentWorkID:   workID,
+		WorkerSessionID: workerSessionID,
+		Preset:          preset,
+		WebhookURL:      req.WebhookURL,
+		WebhookSecret:   req.WebhookSecret,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "already started") {
+			status = http.StatusConflict
+		}
+		writeError(w, status, "start_failed", err.Error())
+		return
+	}
+	s.liveSessions.Upsert(liveSessionInfo{
+		GatewaySessionID: gatewaySessionID,
+		WorkerSessionID:  workerSessionID,
+		WorkID:           workID,
+		StreamID:         gatewaySessionID,
+		Sender:           sender,
+	})
+	writeJSON(w, http.StatusAccepted, SessionStartResponse{
+		Status:           "starting",
+		GatewaySessionID: gatewaySessionID,
+		WorkerSessionID:  workerSessionID,
+		WorkID:           workID,
+		RTMPURL:          s.publicRTMP,
+		Stream:           stream,
 	})
 }
 
@@ -619,6 +739,61 @@ func (s *Server) handleStreamTopup(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+func (s *Server) handleSessionTopup(w http.ResponseWriter, r *http.Request) {
+	if !s.mode.IsLive() {
+		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
+		return
+	}
+	gatewaySessionID := strings.TrimSpace(r.PathValue("gateway_session_id"))
+	if gatewaySessionID == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "gateway_session_id is required")
+		return
+	}
+	info, ok, reason := s.activeSessionInfoForGatewaySession(r.Context(), gatewaySessionID)
+	if !ok {
+		if reason == "stream_not_active" {
+			writeError(w, http.StatusConflict, reason, "session is not active")
+			return
+		}
+		writeError(w, http.StatusNotFound, types.ErrCodeStreamNotFound, gatewaySessionID)
+		return
+	}
+	if s.payment == nil && !s.dev {
+		writeError(w, http.StatusServiceUnavailable, "payment_unavailable", "payment broker is not wired")
+		return
+	}
+	ticket, code, err := s.decodeRequestPayment(r, "", s.payment != nil && !s.dev)
+	if err != nil {
+		if code == http.StatusPaymentRequired {
+			writeError(w, code, "payment", "missing payment ticket")
+			return
+		}
+		writeError(w, code, "bad_ticket", err.Error())
+		return
+	}
+	if s.payment != nil && !s.dev {
+		receipt, err := s.payment.ProcessPayment(r.Context(), ticket, info.WorkID)
+		if err != nil {
+			writeError(w, http.StatusPaymentRequired, types.ErrCodeInvalidPayment, err.Error())
+			return
+		}
+		if len(info.Sender) > 0 && len(receipt.Sender) > 0 && subtle.ConstantTimeCompare(info.Sender, receipt.Sender) != 1 {
+			writeError(w, http.StatusConflict, "sender_mismatch", "topup sender does not match session sender")
+			return
+		}
+	}
+	if err := s.liveRunner.Topup(r.Context(), info.StreamID, ticket); err != nil {
+		writeError(w, http.StatusInternalServerError, "topup_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, SessionTopupResponse{
+		Status:           "credited",
+		GatewaySessionID: gatewaySessionID,
+		WorkerSessionID:  info.WorkerSessionID,
+		WorkID:           info.WorkID,
+	})
+}
+
 // StreamStatusRequest is the body for POST /stream/status.
 type StreamStatusRequest struct {
 	WorkID   string `json:"work_id,omitempty"`
@@ -642,6 +817,49 @@ func (s *Server) handleStreamStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stream)
+}
+
+func (s *Server) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
+	if !s.mode.IsLive() {
+		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
+		return
+	}
+	gatewaySessionID := strings.TrimSpace(r.PathValue("gateway_session_id"))
+	if gatewaySessionID == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "gateway_session_id is required")
+		return
+	}
+	info, ok, reason := s.activeSessionInfoForGatewaySession(r.Context(), gatewaySessionID)
+	if !ok {
+		if reason == "stream_not_active" {
+			writeError(w, http.StatusConflict, reason, "session is not active")
+			return
+		}
+		writeError(w, http.StatusNotFound, types.ErrCodeStreamNotFound, gatewaySessionID)
+		return
+	}
+	stream, err := s.repo.GetStream(r.Context(), gatewaySessionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, types.ErrCodeStreamNotFound, gatewaySessionID)
+		return
+	}
+	if err := s.liveRunner.Stop(r.Context(), info.StreamID); err != nil {
+		writeError(w, http.StatusInternalServerError, "stop_failed", err.Error())
+		return
+	}
+	if s.payment != nil && !s.dev && stream.Phase == types.StreamPhaseStarting {
+		if err := s.payment.CloseSession(r.Context(), info.Sender, info.WorkID); err != nil {
+			writeError(w, http.StatusBadGateway, "close_session_failed", err.Error())
+			return
+		}
+	}
+	s.liveSessions.Delete(gatewaySessionID)
+	writeJSON(w, http.StatusOK, SessionEndResponse{
+		Status:           "ended",
+		GatewaySessionID: gatewaySessionID,
+		WorkerSessionID:  info.WorkerSessionID,
+		WorkID:           info.WorkID,
+	})
 }
 
 // maybeProcessPayment runs ProcessPayment if a ticket is present and
@@ -695,6 +913,83 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+type liveSessionInfo struct {
+	GatewaySessionID string
+	WorkerSessionID  string
+	WorkID           string
+	StreamID         string
+	Sender           []byte
+}
+
+type liveSessionRegistry struct {
+	mu    sync.Mutex
+	items map[string]liveSessionInfo
+}
+
+func (s *Server) sessionInfoForGatewaySession(ctx context.Context, gatewaySessionID string) (liveSessionInfo, bool) {
+	if info, ok := s.liveSessions.Get(gatewaySessionID); ok {
+		return info, true
+	}
+	stream, err := s.repo.GetStream(ctx, gatewaySessionID)
+	if err != nil {
+		return liveSessionInfo{}, false
+	}
+	if stream.GatewaySessionID == "" {
+		stream.GatewaySessionID = stream.WorkID
+	}
+	return liveSessionInfo{
+		GatewaySessionID: stream.GatewaySessionID,
+		WorkerSessionID:  stream.WorkerSessionID,
+		WorkID:           firstNonEmpty(stream.PaymentWorkID, stream.WorkID),
+		StreamID:         stream.WorkID,
+		Sender:           append([]byte(nil), stream.Sender...),
+	}, true
+}
+
+func (s *Server) activeSessionInfoForGatewaySession(ctx context.Context, gatewaySessionID string) (liveSessionInfo, bool, string) {
+	stream, err := s.repo.GetStream(ctx, gatewaySessionID)
+	if err != nil {
+		return liveSessionInfo{}, false, ""
+	}
+	if stream.Phase.IsTerminal() || stream.Phase == types.StreamPhaseClosing {
+		s.liveSessions.Delete(gatewaySessionID)
+		return liveSessionInfo{}, false, "stream_not_active"
+	}
+	info, ok := s.sessionInfoForGatewaySession(ctx, gatewaySessionID)
+	if !ok {
+		return liveSessionInfo{}, false, ""
+	}
+	return info, true, ""
+}
+
+func newLiveSessionRegistry() *liveSessionRegistry {
+	return &liveSessionRegistry{items: make(map[string]liveSessionInfo)}
+}
+
+func (r *liveSessionRegistry) Upsert(info liveSessionInfo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	info.Sender = append([]byte(nil), info.Sender...)
+	r.items[info.GatewaySessionID] = info
+}
+
+func (r *liveSessionRegistry) Get(gatewaySessionID string) (liveSessionInfo, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	info, ok := r.items[gatewaySessionID]
+	if !ok {
+		return liveSessionInfo{}, false
+	}
+	info.Sender = append([]byte(nil), info.Sender...)
+	return info, true
+}
+
+func (r *liveSessionRegistry) Delete(gatewaySessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.items, gatewaySessionID)
+}
+
 func decodeTicket(ticketB64 string) ([]byte, error) {
 	if ticketB64 == "" {
 		return nil, nil
@@ -704,6 +999,21 @@ func decodeTicket(ticketB64 string) ([]byte, error) {
 		return nil, fmt.Errorf("bad base64: %w", err)
 	}
 	return b, nil
+}
+
+func deriveSessionWorkID(paymentBytes []byte) string {
+	if len(paymentBytes) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(paymentBytes)
+	return hex.EncodeToString(sum[:])
+}
+
+func deriveWorkerSessionID(workID string) string {
+	if workID == "" {
+		return "worker_session_unknown"
+	}
+	return "worker_" + workID
 }
 
 func (s *Server) requireBearerAuth(w http.ResponseWriter, r *http.Request) bool {

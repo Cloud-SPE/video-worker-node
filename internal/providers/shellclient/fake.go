@@ -13,6 +13,7 @@ type Fake struct {
 	mu sync.Mutex
 
 	ValidateFunc           func(ctx context.Context, in ValidateKeyInput) (ValidateKeyResult, error)
+	PostEventFunc          func(ctx context.Context, in WorkerEventInput) error
 	SessionActiveFunc      func(ctx context.Context, in SessionActiveInput) (SessionActiveResult, error)
 	SessionTickFunc        func(ctx context.Context, in SessionTickInput) (SessionTickResult, error)
 	SessionEndedFunc       func(ctx context.Context, in SessionEndedInput) (SessionEndedResult, error)
@@ -20,6 +21,7 @@ type Fake struct {
 	TopupFunc              func(ctx context.Context, in TopupInput) (TopupResult, error)
 
 	ValidateCalls           []ValidateKeyInput
+	EventCalls              []WorkerEventInput
 	SessionActiveCalls      []SessionActiveInput
 	SessionTickCalls        []SessionTickInput
 	SessionEndedCalls       []SessionEndedInput
@@ -39,6 +41,17 @@ func (f *Fake) ValidateKey(ctx context.Context, in ValidateKeyInput) (ValidateKe
 		return fn(ctx, in)
 	}
 	return ValidateKeyResult{Accepted: true, StreamID: "live_fake", ProjectID: "proj_fake", RecordingEnabled: true}, nil
+}
+
+func (f *Fake) PostEvent(ctx context.Context, in WorkerEventInput) error {
+	f.mu.Lock()
+	f.EventCalls = append(f.EventCalls, in)
+	fn := f.PostEventFunc
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, in)
+	}
+	return nil
 }
 
 func (f *Fake) SessionActive(ctx context.Context, in SessionActiveInput) (SessionActiveResult, error) {
@@ -105,6 +118,11 @@ func (f *Fake) Snapshot() FakeSnapshot {
 		copy(o, in)
 		return o
 	}
+	cpEvents := func(in []WorkerEventInput) []WorkerEventInput {
+		o := make([]WorkerEventInput, len(in))
+		copy(o, in)
+		return o
+	}
 	cp2 := func(in []SessionActiveInput) []SessionActiveInput {
 		o := make([]SessionActiveInput, len(in))
 		copy(o, in)
@@ -128,6 +146,7 @@ func (f *Fake) Snapshot() FakeSnapshot {
 	cp6 := func(in []TopupInput) []TopupInput { o := make([]TopupInput, len(in)); copy(o, in); return o }
 	return FakeSnapshot{
 		Validate:           cp(f.ValidateCalls),
+		Events:             cpEvents(f.EventCalls),
 		SessionActive:      cp2(f.SessionActiveCalls),
 		SessionTick:        cp3(f.SessionTickCalls),
 		SessionEnded:       cp4(f.SessionEndedCalls),
@@ -138,6 +157,7 @@ func (f *Fake) Snapshot() FakeSnapshot {
 
 type FakeSnapshot struct {
 	Validate           []ValidateKeyInput
+	Events             []WorkerEventInput
 	SessionActive      []SessionActiveInput
 	SessionTick        []SessionTickInput
 	SessionEnded       []SessionEndedInput

@@ -1,10 +1,14 @@
-// Package shellclient is the worker → shell HTTP client over the
-// /internal/live/* callback API. Auth is a shared secret presented via
-// the X-Worker-Secret header.
+// Package shellclient is the worker → gateway HTTP client for live
+// session validation plus worker-originated lifecycle/accounting events.
+// During the Pattern B rewrite it still carries the legacy
+// /internal/live/* callbacks on the fallback path. Auth is a shared
+// secret presented via the X-Worker-Secret header.
 //
-// This is the worker's complement to the routes in
-// `apps/api/src/runtime/http/internal/live/`. Wire formats are kept in
-// lockstep with the zod schemas there.
+// This is the worker's complement to the shell/gateway internal live
+// routes. New Pattern B traffic is expected to converge on
+// /internal/live/events while validate-key remains a separate control
+// call; older session-active/session-tick/session-ended callbacks remain
+// here until the gateway rewrite removes them.
 package shellclient
 
 import (
@@ -19,10 +23,11 @@ import (
 	"time"
 )
 
-// Client is the worker's shell-callback surface. Implementations: the
+// Client is the worker's gateway callback surface. Implementations: the
 // HTTP client below, plus a Fake for tests.
 type Client interface {
 	ValidateKey(ctx context.Context, in ValidateKeyInput) (ValidateKeyResult, error)
+	PostEvent(ctx context.Context, in WorkerEventInput) error
 	SessionActive(ctx context.Context, in SessionActiveInput) (SessionActiveResult, error)
 	SessionTick(ctx context.Context, in SessionTickInput) (SessionTickResult, error)
 	SessionEnded(ctx context.Context, in SessionEndedInput) (SessionEndedResult, error)
@@ -40,6 +45,27 @@ type ValidateKeyResult struct {
 	StreamID         string
 	ProjectID        string
 	RecordingEnabled bool
+}
+
+type WorkerEventInput struct {
+	GatewaySessionID    string
+	WorkerSessionID     string
+	WorkID              string
+	Type                string
+	UsageSeq            uint64
+	Units               int64
+	UnitType            string
+	RemainingRunway     int64
+	LowBalance          bool
+	Reason              string
+	Message             string
+	Recoverable         bool
+	FinalUnits          int64
+	OccurredAt          time.Time
+	RecordingAssetID    string
+	MasterStorageKey    string
+	SegmentStorageKeys  []string
+	TotalDurationSecond float64
 }
 
 // SessionActiveInput / SessionActiveResult — POST /internal/live/session-active.
@@ -241,6 +267,27 @@ type recordingFinalizedResp struct {
 	RecordingAssetID string `json:"recording_asset_id"`
 }
 
+type workerEventReq struct {
+	GatewaySessionID    string   `json:"gateway_session_id"`
+	WorkerSessionID     string   `json:"worker_session_id,omitempty"`
+	WorkID              string   `json:"work_id,omitempty"`
+	Type                string   `json:"type"`
+	UsageSeq            uint64   `json:"usage_seq,omitempty"`
+	Units               int64    `json:"units,omitempty"`
+	UnitType            string   `json:"unit_type,omitempty"`
+	RemainingRunway     int64    `json:"remaining_runway_units,omitempty"`
+	LowBalance          bool     `json:"low_balance,omitempty"`
+	Reason              string   `json:"reason,omitempty"`
+	Message             string   `json:"message,omitempty"`
+	Recoverable         bool     `json:"recoverable,omitempty"`
+	FinalUnits          int64    `json:"final_units,omitempty"`
+	OccurredAt          string   `json:"occurred_at,omitempty"`
+	RecordingAssetID    string   `json:"recording_asset_id,omitempty"`
+	MasterStorageKey    string   `json:"master_storage_key,omitempty"`
+	SegmentStorageKeys  []string `json:"segment_storage_keys,omitempty"`
+	TotalDurationSecond float64  `json:"total_duration_sec,omitempty"`
+}
+
 type topupReq struct {
 	StreamID       string `json:"stream_id"`
 	RequestSeconds int64  `json:"request_seconds"`
@@ -260,6 +307,32 @@ func (c *httpClient) ValidateKey(ctx context.Context, in ValidateKeyInput) (Vali
 		Accepted: resp.Accepted, StreamID: resp.StreamID,
 		ProjectID: resp.ProjectID, RecordingEnabled: resp.RecordingEnabled,
 	}, err
+}
+
+func (c *httpClient) PostEvent(ctx context.Context, in WorkerEventInput) error {
+	body := workerEventReq{
+		GatewaySessionID:    in.GatewaySessionID,
+		WorkerSessionID:     in.WorkerSessionID,
+		WorkID:              in.WorkID,
+		Type:                in.Type,
+		UsageSeq:            in.UsageSeq,
+		Units:               in.Units,
+		UnitType:            in.UnitType,
+		RemainingRunway:     in.RemainingRunway,
+		LowBalance:          in.LowBalance,
+		Reason:              in.Reason,
+		Message:             in.Message,
+		Recoverable:         in.Recoverable,
+		FinalUnits:          in.FinalUnits,
+		RecordingAssetID:    in.RecordingAssetID,
+		MasterStorageKey:    in.MasterStorageKey,
+		SegmentStorageKeys:  in.SegmentStorageKeys,
+		TotalDurationSecond: in.TotalDurationSecond,
+	}
+	if !in.OccurredAt.IsZero() {
+		body.OccurredAt = in.OccurredAt.UTC().Format(time.RFC3339Nano)
+	}
+	return c.post(ctx, "/internal/live/events", body, nil)
 }
 
 func (c *httpClient) SessionActive(ctx context.Context, in SessionActiveInput) (SessionActiveResult, error) {

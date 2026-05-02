@@ -14,6 +14,8 @@ import (
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/shellclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/store"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
+	"github.com/Cloud-SPE/video-worker-node/internal/service/paymentbroker"
+	"github.com/Cloud-SPE/video-worker-node/internal/types"
 )
 
 // fakeSession implements ingest.IngestSession.
@@ -91,21 +93,62 @@ func newRunnerWithFakes(t *testing.T) (*Runner, *shellclient.Fake, func() *scrip
 		return enc
 	}
 	r, err := New(Config{
-		Repo:             repo,
-		Shell:            shell,
-		EncoderFactory:   factory,
-		WorkerURL:        "http://worker:8080",
-		LivePreset:       "h264-live",
-		DebitCadence:     20 * time.Millisecond,
-		RunwaySeconds:    30,
-		GraceSeconds:     1,
-		PreCreditSeconds: 60,
-		TopupMinInterval: time.Millisecond,
+		Repo:              repo,
+		Shell:             shell,
+		EncoderFactory:    factory,
+		WorkerURL:         "http://worker:8080",
+		LivePreset:        "h264-live",
+		DebitCadence:      20 * time.Millisecond,
+		DebitRetryBackoff: time.Millisecond,
+		RunwaySeconds:     30,
+		GraceSeconds:      1,
+		PreCreditSeconds:  60,
+		TopupMinInterval:  time.Millisecond,
+		SleepFn:           func(time.Duration) {},
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
 	return r, shell, getEnc, repo
+}
+
+func newPatternBRunnerWithFakes(t *testing.T) (*Runner, *shellclient.Fake, *paymentbroker.Fake, func() *scriptedEncoder, *jobs.Repo) {
+	t.Helper()
+	repo := jobs.New(store.Memory())
+	shell := shellclient.NewFake()
+	payment := paymentbroker.NewFake()
+	var (
+		mu  sync.Mutex
+		enc *scriptedEncoder
+	)
+	factory := func() Encoder {
+		mu.Lock()
+		defer mu.Unlock()
+		enc = newScriptedEncoder()
+		return enc
+	}
+	getEnc := func() *scriptedEncoder {
+		mu.Lock()
+		defer mu.Unlock()
+		return enc
+	}
+	r, err := New(Config{
+		Repo:              repo,
+		Shell:             shell,
+		Payment:           payment,
+		EncoderFactory:    factory,
+		WorkerURL:         "http://worker:8080",
+		LivePreset:        "h264-live",
+		DebitCadence:      20 * time.Millisecond,
+		DebitRetryBackoff: time.Millisecond,
+		RunwaySeconds:     30,
+		GraceSeconds:      1,
+		SleepFn:           func(time.Duration) {},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	return r, shell, payment, getEnc, repo
 }
 
 func waitFor(t *testing.T, cond func() bool, timeout time.Duration, msg string) {
@@ -344,4 +387,282 @@ func TestPersistsStreamRecordOnAccept(t *testing.T) {
 	if got.WorkID != "live_fake" {
 		t.Errorf("WorkID=%q", got.WorkID)
 	}
+}
+
+func TestAcceptPatternBUsesLocalPaymentAndEvents(t *testing.T) {
+	r, shell, payment, getEnc, repo := newPatternBRunnerWithFakes(t)
+	shell.ValidateFunc = func(_ context.Context, _ shellclient.ValidateKeyInput) (shellclient.ValidateKeyResult, error) {
+		return shellclient.ValidateKeyResult{Accepted: true, StreamID: "gw_123", ProjectID: "proj_fake", RecordingEnabled: false}, nil
+	}
+	if _, err := r.Start(context.Background(), StartRequest{
+		WorkID:          "gw_123",
+		Sender:          []byte("fake-sender"),
+		PaymentWorkID:   "work_123",
+		WorkerSessionID: "worker_123",
+		Preset:          "h264-live",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	payment.CreditFor("work_123", 120)
+
+	sess := newFakeSession("sk_live_pattern_b", "")
+	if _, err := r.Accept(context.Background(), sess); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if len(shell.SessionActiveCalls) != 0 {
+		t.Fatalf("legacy session-active should not fire in Pattern B path")
+	}
+	got, err := repo.GetStream(context.Background(), "gw_123")
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.GatewaySessionID != "gw_123" || got.WorkerSessionID != "worker_123" || got.PaymentWorkID != "work_123" {
+		t.Fatalf("unexpected persisted correlation state: %+v", got)
+	}
+
+	enc := getEnc()
+	if enc == nil {
+		t.Fatal("encoder factory not invoked")
+	}
+	enc.advance(5)
+	waitFor(t, func() bool { return len(shell.Snapshot().Events) >= 2 }, time.Second, "pattern-b events")
+
+	events := shell.Snapshot().Events
+	if events[0].Type != "session.ready" {
+		t.Fatalf("first event type=%q want session.ready", events[0].Type)
+	}
+	foundTick := false
+	for _, ev := range events {
+		if ev.Type == "session.usage.tick" {
+			foundTick = true
+			if ev.WorkID != "work_123" {
+				t.Fatalf("tick work_id=%q want work_123", ev.WorkID)
+			}
+			if ev.WorkerSessionID != "worker_123" {
+				t.Fatalf("tick worker_session_id=%q want worker_123", ev.WorkerSessionID)
+			}
+		}
+	}
+	if !foundTick {
+		t.Fatal("expected session.usage.tick event")
+	}
+
+	enc.finish(ErrEncoderExited)
+	waitFor(t, func() bool {
+		for _, ev := range shell.Snapshot().Events {
+			if ev.Type == "session.ended" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, "session.ended")
+	if !payment.IsClosed("work_123") {
+		t.Fatal("expected payment session to be closed")
+	}
+}
+
+func TestPatternBStopUsesFreshContextForTerminalEvent(t *testing.T) {
+	r, shell, payment, _, _ := newPatternBRunnerWithFakes(t)
+	shell.ValidateFunc = func(_ context.Context, _ shellclient.ValidateKeyInput) (shellclient.ValidateKeyResult, error) {
+		return shellclient.ValidateKeyResult{Accepted: true, StreamID: "gw_123", ProjectID: "proj_fake", RecordingEnabled: false}, nil
+	}
+	var endedPosted atomic.Bool
+	shell.PostEventFunc = func(ctx context.Context, in shellclient.WorkerEventInput) error {
+		if in.Type == "session.ended" {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			endedPosted.Store(true)
+		}
+		return nil
+	}
+	if _, err := r.Start(context.Background(), StartRequest{
+		WorkID:          "gw_123",
+		Sender:          []byte("fake-sender"),
+		PaymentWorkID:   "work_123",
+		WorkerSessionID: "worker_123",
+		Preset:          "h264-live",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	payment.CreditFor("work_123", 120)
+
+	sess := newFakeSession("sk_live_pattern_b", "")
+	if _, err := r.Accept(context.Background(), sess); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := r.Stop(context.Background(), "gw_123"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	waitFor(t, endedPosted.Load, time.Second, "pattern-b session.ended event")
+}
+
+func TestPatternBLowBalancePersistsDurableState(t *testing.T) {
+	r, shell, payment, getEnc, repo := newPatternBRunnerWithFakes(t)
+	shell.ValidateFunc = func(_ context.Context, _ shellclient.ValidateKeyInput) (shellclient.ValidateKeyResult, error) {
+		return shellclient.ValidateKeyResult{Accepted: true, StreamID: "gw_123", ProjectID: "proj_fake", RecordingEnabled: false}, nil
+	}
+	if _, err := r.Start(context.Background(), StartRequest{
+		WorkID:          "gw_123",
+		Sender:          []byte("fake-sender"),
+		PaymentWorkID:   "work_123",
+		WorkerSessionID: "worker_123",
+		Preset:          "h264-live",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	payment.CreditFor("work_123", 5)
+
+	sess := newFakeSession("sk_live_pattern_b", "")
+	if _, err := r.Accept(context.Background(), sess); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	enc := getEnc()
+	enc.advance(1)
+	waitFor(t, func() bool {
+		for _, ev := range shell.Snapshot().Events {
+			if ev.Type == "session.balance.low" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, "pattern-b low-balance event")
+
+	got, err := repo.GetStream(context.Background(), "gw_123")
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Phase != types.StreamPhaseLowBalance {
+		t.Fatalf("Phase=%q want %q", got.Phase, types.StreamPhaseLowBalance)
+	}
+	if !got.LowBalance {
+		t.Fatal("expected LowBalance=true")
+	}
+	if got.GraceUntil.IsZero() {
+		t.Fatal("expected GraceUntil to be set")
+	}
+
+	enc.finish(ErrEncoderExited)
+	waitFor(t, func() bool {
+		for _, ev := range shell.Snapshot().Events {
+			if ev.Type == "session.ended" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, "session.ended")
+}
+
+func TestPatternBRefillClearsDurableLowBalanceState(t *testing.T) {
+	r, shell, payment, getEnc, repo := newPatternBRunnerWithFakes(t)
+	shell.ValidateFunc = func(_ context.Context, _ shellclient.ValidateKeyInput) (shellclient.ValidateKeyResult, error) {
+		return shellclient.ValidateKeyResult{Accepted: true, StreamID: "gw_123", ProjectID: "proj_fake", RecordingEnabled: false}, nil
+	}
+	if _, err := r.Start(context.Background(), StartRequest{
+		WorkID:          "gw_123",
+		Sender:          []byte("fake-sender"),
+		PaymentWorkID:   "work_123",
+		WorkerSessionID: "worker_123",
+		Preset:          "h264-live",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	payment.CreditFor("work_123", 5)
+
+	sess := newFakeSession("sk_live_pattern_b", "")
+	if _, err := r.Accept(context.Background(), sess); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	enc := getEnc()
+	enc.advance(1)
+	waitFor(t, func() bool {
+		for _, ev := range shell.Snapshot().Events {
+			if ev.Type == "session.balance.low" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, "pattern-b low-balance event")
+
+	payment.CreditFor("work_123", 100)
+	enc.advance(1)
+	waitFor(t, func() bool {
+		for _, ev := range shell.Snapshot().Events {
+			if ev.Type == "session.balance.refilled" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, "pattern-b refilled event")
+
+	got, err := repo.GetStream(context.Background(), "gw_123")
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Phase != types.StreamPhaseStreaming {
+		t.Fatalf("Phase=%q want %q", got.Phase, types.StreamPhaseStreaming)
+	}
+	if got.LowBalance {
+		t.Fatal("expected LowBalance=false")
+	}
+	if !got.GraceUntil.IsZero() {
+		t.Fatal("expected GraceUntil to be cleared")
+	}
+
+	enc.finish(ErrEncoderExited)
+	waitFor(t, func() bool {
+		for _, ev := range shell.Snapshot().Events {
+			if ev.Type == "session.ended" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, "session.ended")
+}
+
+func TestPatternBEventPostingRetriesTransientFailure(t *testing.T) {
+	r, shell, payment, getEnc, _ := newPatternBRunnerWithFakes(t)
+	shell.ValidateFunc = func(_ context.Context, _ shellclient.ValidateKeyInput) (shellclient.ValidateKeyResult, error) {
+		return shellclient.ValidateKeyResult{Accepted: true, StreamID: "gw_123", ProjectID: "proj_fake", RecordingEnabled: false}, nil
+	}
+	var readyAttempts atomic.Int32
+	shell.PostEventFunc = func(_ context.Context, in shellclient.WorkerEventInput) error {
+		if in.Type == "session.ready" {
+			n := readyAttempts.Add(1)
+			if n < 3 {
+				return errors.New("transient event ingest failure")
+			}
+		}
+		return nil
+	}
+	if _, err := r.Start(context.Background(), StartRequest{
+		WorkID:          "gw_123",
+		Sender:          []byte("fake-sender"),
+		PaymentWorkID:   "work_123",
+		WorkerSessionID: "worker_123",
+		Preset:          "h264-live",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	payment.CreditFor("work_123", 120)
+
+	sess := newFakeSession("sk_live_pattern_b", "")
+	if _, err := r.Accept(context.Background(), sess); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	waitFor(t, func() bool { return readyAttempts.Load() == 3 }, time.Second, "event post retries")
+
+	enc := getEnc()
+	if enc == nil {
+		t.Fatal("encoder factory not invoked")
+	}
+	enc.finish(ErrEncoderExited)
+	waitFor(t, func() bool {
+		for _, ev := range shell.Snapshot().Events {
+			if ev.Type == "session.ended" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, "session.ended")
 }

@@ -285,24 +285,27 @@ func (p StreamPhase) IsTerminal() bool {
 
 // Stream is the durable record of one live streaming session.
 type Stream struct {
-	WorkID        string      `json:"work_id"`
-	Sender        []byte      `json:"sender,omitempty"`
-	Phase         StreamPhase `json:"phase"`
-	SubscribeURL  string      `json:"subscribe_url"`
-	PublishURL    string      `json:"publish_url"`
-	Preset        string      `json:"preset"`
-	StartedAt     time.Time   `json:"started_at"`
-	UpdatedAt     time.Time   `json:"updated_at"`
-	ClosedAt      time.Time   `json:"closed_at,omitempty"`
-	DebitSeq      uint64      `json:"debit_seq"`
-	UnitsDebited  int64       `json:"units_debited"`
-	WebhookURL    string      `json:"webhook_url,omitempty"`
-	WebhookSecret string      `json:"-"`
-	LastTopupAt   time.Time   `json:"last_topup_at,omitempty"`
-	LowBalance    bool        `json:"low_balance"`
-	GraceUntil    time.Time   `json:"grace_until,omitempty"`
-	CloseReason   string      `json:"close_reason,omitempty"`
-	ErrorCode     string      `json:"error_code,omitempty"`
+	WorkID           string      `json:"work_id"`
+	GatewaySessionID string      `json:"gateway_session_id,omitempty"`
+	WorkerSessionID  string      `json:"worker_session_id,omitempty"`
+	PaymentWorkID    string      `json:"payment_work_id,omitempty"`
+	Sender           []byte      `json:"sender,omitempty"`
+	Phase            StreamPhase `json:"phase"`
+	SubscribeURL     string      `json:"subscribe_url"`
+	PublishURL       string      `json:"publish_url"`
+	Preset           string      `json:"preset"`
+	StartedAt        time.Time   `json:"started_at"`
+	UpdatedAt        time.Time   `json:"updated_at"`
+	ClosedAt         time.Time   `json:"closed_at,omitempty"`
+	DebitSeq         uint64      `json:"debit_seq"`
+	UnitsDebited     int64       `json:"units_debited"`
+	WebhookURL       string      `json:"webhook_url,omitempty"`
+	WebhookSecret    string      `json:"-"`
+	LastTopupAt      time.Time   `json:"last_topup_at,omitempty"`
+	LowBalance       bool        `json:"low_balance"`
+	GraceUntil       time.Time   `json:"grace_until,omitempty"`
+	CloseReason      string      `json:"close_reason,omitempty"`
+	ErrorCode        string      `json:"error_code,omitempty"`
 }
 
 // CapacityReport summarizes the worker's current load.

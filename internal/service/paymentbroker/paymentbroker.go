@@ -51,6 +51,7 @@ type Fake struct {
 	balances map[string]int64
 	debits   []FakeDebit
 	closed   map[string]bool
+	closes   map[string]int
 
 	// CreditPerProcess is the amount ProcessPayment credits per call.
 	// Default 100; tests override to 0 when they're driving the balance
@@ -73,7 +74,7 @@ type FakeDebit struct {
 
 // NewFake returns an empty Fake. Default CreditPerProcess is 100.
 func NewFake() *Fake {
-	return &Fake{balances: map[string]int64{}, closed: map[string]bool{}, CreditPerProcess: 100}
+	return &Fake{balances: map[string]int64{}, closed: map[string]bool{}, closes: map[string]int{}, CreditPerProcess: 100}
 }
 
 // CreditFor sets the balance for a workID directly. Used in tests to
@@ -125,6 +126,7 @@ func (f *Fake) CloseSession(_ context.Context, _ []byte, workID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed[workID] = true
+	f.closes[workID]++
 	return nil
 }
 
@@ -149,4 +151,11 @@ func (f *Fake) IsClosed(workID string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closed[workID]
+}
+
+// CloseCount returns how many times CloseSession was called for workID.
+func (f *Fake) CloseCount(workID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closes[workID]
 }

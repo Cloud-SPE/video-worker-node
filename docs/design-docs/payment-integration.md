@@ -6,7 +6,7 @@ last-reviewed: 2026-04-26
 
 # Payment integration
 
-How the shell pays workers and how the customer's wallet gets charged.
+How the gateway pays workers and how the customer's wallet gets charged.
 
 > **Status**: drafted. Worker-side implementations live in
 > `internal/service/paymentbroker/` (VOD/ABR debit pipeline) and
@@ -16,17 +16,17 @@ How the shell pays workers and how the customer's wallet gets charged.
 
 There are two distinct payment loops and they shouldn't be confused:
 
-1. **Shell ↔ worker payment**: probabilistic micropayment tickets per
+1. **Gateway ↔ worker payment**: probabilistic micropayment tickets per
    transcode unit (or per debit-tick for live), routed via
    `livepeer-modules/payment-daemon`. Worker's payment-daemon
-   receiver validates; shell's payment-daemon sender mints. Wire
+   receiver validates; gateway's payment-daemon sender mints. Wire
    compatibility with `go-livepeer`'s `net.Payment` is preserved by
    `livepeer-modules`.
-2. **Customer ↔ shell wallet**: the project's prepaid balance gets reserved
+2. **Customer ↔ gateway wallet**: the project's prepaid balance gets reserved
    and committed via the engine's `Wallet` adapter. The shell's
    `prepaidWallet` impl writes to `app.balances` and `app.reservations`.
 
-These loops are independent. The shell could swap its `Wallet` impl (e.g.,
+These loops are independent. The gateway could swap its `Wallet` impl (e.g.,
 to a postpaid Stripe-billed model post-MVP) without changing anything about
 how it pays workers. Conversely, the worker payment scheme could change
 (e.g., a future non-Livepeer payment system) without touching the customer
@@ -37,7 +37,7 @@ wallet.
 For VOD encoding (one discrete request → one discrete payment):
 
 ```
-Shell (livepeer-video-gateway)
+Gateway (livepeer-video-gateway)
   │
   ├─ Engine dispatcher: dispatchVodSubmit / scheduleEncodeJobs
   │
@@ -76,42 +76,60 @@ Shell (livepeer-video-gateway)
 This is the same shape as `openai-livepeer-bridge` → `openai-worker-node`.
 Mature, well-trodden.
 
-## Streaming-session pattern (live)
+## Streaming-session pattern (live, Pattern B target)
 
 For live HLS (one open session → many continuous debits):
 
 ```
-Worker accepts RTMP, calls back to shell to validate stream key
+Gateway resolves worker, mints initial payment credit, opens worker session
   │
-  └─ Shell payment-daemon: OpenStreamingSession({ stream_id, capability,
-                                                   initial_credit_seconds: 60 })
-                              ↑ session_id
+  └─ Worker: ProcessPayment(payment_bytes, work_id)
+                              ↑ worker_session_id + work_id
                                 ↓
+Broadcaster connects RTMP; worker accepts and starts encoder
+  │
 Worker debits every 5s (cadence):
-  └─ payment-daemon: DebitStreamingSession({ session_id, seq: <monotonic>,
-                                              debit_seconds: <delta> })
-                              ↑ remaining_runway_seconds
+  └─ payment-daemon: DebitBalance({ sender, work_id, seq: <monotonic>, units: <seconds> })
                                 ↓
-If runway < 30s, worker → shell /internal/live/topup:
-  └─ Shell: payment-daemon.TopUpStreamingSession({ session_id, more_seconds })
-                              ↑ ok? insufficient_balance?
+Worker checks local runway:
+  └─ payment-daemon: SufficientBalance({ sender, work_id, min_units: 30 })
                                 ↓
-If runway hits 0 + grace_seconds (60s) elapses:
-  └─ Worker closes FFmpeg, payment-daemon:
-       CloseStreamingSession({ session_id, final_seq, reason: 'insufficient_balance' })
-
-On graceful broadcaster disconnect:
-  └─ payment-daemon: CloseStreamingSession({ session_id, final_seq, reason: 'broadcaster_disconnect' })
+Worker emits usage/accounting events to gateway:
+  └─ POST /internal/live/events
+       types: session.ready, session.usage.tick, session.balance.low,
+              session.balance.refilled, session.ended, session.recording.ready
+                                ↓
+If worker signals low balance:
+  └─ Gateway decides whether customer USD balance authorizes more funding
+       ├─ yes: mint fresh payment and POST /api/sessions/{gateway_session_id}/topup
+       └─ no: expose customer-visible low balance and let worker's grace timer run
+                                ↓
+If grace expires:
+  └─ Worker closes FFmpeg, emits session.ended(reason=insufficient_balance),
+     and closes the receiver-side payment session
 ```
 
 Specs:
 - The pattern itself is `livepeer-modules/payment-daemon`'s
   contribution; we consume it.
-- The live state machine that wraps it lives in
-  [`live-state-machine.md`](live-state-machine.md) (lands in plan 0006).
-- The shell-side reservation/ledger interaction during a streaming session
-  lives in [`wallet-and-billing.md`](wallet-and-billing.md) (lands in plan
-  0004 and gets extended in plan 0006).
+- The worker-side live session pattern is being rewritten under
+  [`streaming-session-pattern.md`](streaming-session-pattern.md) and plan 0005.
+- The gateway-side billing/event-ingest rewrite is the companion effort in
+  the sibling gateway repo.
+
+## Customer-visible balance semantics
+
+The customer should only see USD-side funding state. They should not see:
+
+- receiver-side ticket runway
+- `work_id`
+- orch-side ETH depletion
+- internal low-balance events from the worker
+
+The worker's `session.balance.low` event is an internal signal telling
+the gateway it may need to mint more payment credit. The gateway turns
+that into customer-visible low-balance only when the customer's USD
+balance can no longer authorize continued funding.
 
 ## Why the engine doesn't know about payment-daemon
 

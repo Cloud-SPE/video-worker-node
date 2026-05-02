@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func newSrv(t *testing.T, want string, status int, resp any) (*httptest.Server, *[]string) {
@@ -92,6 +93,56 @@ func TestSessionTickRoundTrip(t *testing.T) {
 	}
 	if out.BalanceCents != 999 || out.RunwaySeconds != 30 {
 		t.Fatalf("unexpected result: %+v", out)
+	}
+}
+
+func TestPostEventPostsPatternBEventBody(t *testing.T) {
+	var got workerEventReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/live/events" {
+			t.Fatalf("path=%s want /internal/live/events", r.URL.Path)
+		}
+		if r.Header.Get("X-Worker-Secret") != "s" {
+			t.Fatalf("secret=%q want s", r.Header.Get("X-Worker-Secret"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c, _ := New(Config{BaseURL: srv.URL, Secret: "s"})
+	err := c.PostEvent(context.Background(), WorkerEventInput{
+		GatewaySessionID:    "gw_123",
+		WorkerSessionID:     "worker_123",
+		WorkID:              "work_123",
+		Type:                "session.usage.tick",
+		UsageSeq:            7,
+		Units:               5,
+		UnitType:            "seconds",
+		RemainingRunway:     30,
+		LowBalance:          false,
+		OccurredAt:          time.Unix(1700000000, 123).UTC(),
+		MasterStorageKey:    "live/master.m3u8",
+		SegmentStorageKeys:  []string{"live/seg-1.ts"},
+		TotalDurationSecond: 5,
+	})
+	if err != nil {
+		t.Fatalf("post event: %v", err)
+	}
+	if got.GatewaySessionID != "gw_123" || got.WorkerSessionID != "worker_123" || got.WorkID != "work_123" {
+		t.Fatalf("unexpected ids: %+v", got)
+	}
+	if got.Type != "session.usage.tick" || got.UsageSeq != 7 || got.Units != 5 || got.UnitType != "seconds" {
+		t.Fatalf("unexpected event body: %+v", got)
+	}
+	if got.RemainingRunway != 30 || got.TotalDurationSecond != 5 {
+		t.Fatalf("unexpected accounting fields: %+v", got)
+	}
+	if got.OccurredAt == "" {
+		t.Fatalf("occurred_at missing: %+v", got)
 	}
 }
 

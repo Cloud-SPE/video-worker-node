@@ -6,11 +6,14 @@ last-reviewed: 2026-04-26
 
 # Streaming-session payment pattern
 
-How live streams pay over time. Adapted from `livepeer-modules/payment-daemon`'s
-streaming-session pattern, with the responsibilities split between the
-**worker** (drives the per-session lifecycle), the **payment-daemon**
-(receiver tracks credit, sender mints tickets), and the **shell** (knows
-the customer's prepaid balance and authorizes top-ups).
+How live streams pay over time. This document is in transition from the
+older shell-authoritative live loop to the Pattern B worker-owned
+runtime model defined in plan 0005. The target shape still follows
+`livepeer-modules/payment-daemon`'s streaming-session pattern, with the
+responsibilities split between the **worker** (runtime authority), the
+**payment-daemon** (receiver tracks credit, sender mints tickets), and
+the **gateway/shell** (owns customer USD balance and decides whether to
+mint more ETH-denominated payment credit).
 
 ## Why this pattern (not VOD-style reserve→commit)
 
@@ -24,16 +27,18 @@ commits the actual usage at the end. Live broadcasts don't fit:
   some threshold — they need a small grace window to top up.
 
 Streaming sessions debit small amounts continuously, with a runway
-watermark and a grace period. The platform stops the stream cleanly
-when balance can't sustain it.
+watermark and a grace period. Under Pattern B the worker stops the
+stream cleanly when receiver-side balance can no longer sustain it; the
+gateway's job is to keep feeding fresh credit while the customer's USD
+balance authorizes it.
 
 ## The five-step recipe
 
-1. **Open**: at session-active, `OpenStreamingSession({ stream_id, capability, initial_credit_seconds: 60 })` pre-credits 60s of runway. Returns an opaque `session_id`.
-2. **Tick**: every 5s (`debit_cadence`), the worker calls `DebitStreamingSession({ session_id, seq, debit_seconds: delta })` with the encoded-seconds delta since the last tick. `seq` is monotonically increasing per session — replays of the same `seq` are receiver-side no-ops.
-3. **Watermark**: each tick response carries `remaining_runway_seconds`. If runway < 30s (`stream_runway_seconds`), the worker calls `/internal/live/topup`.
-4. **Top-up**: shell looks up the project's prepaid balance; if sufficient, returns `succeeded:true` + an authorized cents amount. The worker then calls `TopUpStreamingSession({ session_id, more_seconds })` against its co-located payment-daemon. If insufficient, shell fires `video.live_stream.topup_failed` and the worker enters grace.
-5. **Close**: graceful (broadcaster disconnect): `CloseStreamingSession({ session_id, final_seq, reason: 'graceful' })`. Grace-expiry: same call with `reason: 'insufficient_balance'`. Final reconciliation tick + accounting commit happen on the shell side via `/internal/live/session-ended`.
+1. **Open**: gateway resolves a worker, mints direct payment credit, and calls the worker's canonical `POST /api/sessions/start`. The worker runs `ProcessPayment(...)`, derives a durable `work_id`, and returns `worker_session_id`.
+2. **Tick**: every 5s (`debit_cadence`), the worker calls receiver-side `DebitBalance(sender, work_id, units, seq)` with the encoded-seconds delta since the last tick. `seq` is monotonically increasing per session — replays of the same `seq` are receiver-side no-ops.
+3. **Watermark**: after each debit, the worker runs `SufficientBalance(sender, work_id, runway_seconds)` locally. If runway is low, the worker emits `session.balance.low` to the gateway and starts grace locally.
+4. **Top-up**: gateway checks whether the customer's USD balance can continue funding the stream. If yes, it mints fresh payment credit and calls the worker's canonical `POST /api/sessions/{gateway_session_id}/topup`; the worker applies it to the existing `work_id` via `ProcessPayment(...)`. If not, customer-facing low-balance semantics are exposed from the gateway side while the worker counts down grace.
+5. **Close**: graceful broadcaster disconnect or explicit operator stop ends the runtime session. The worker emits `session.ended`, closes the receiver-side payment session, and later emits a separate recording-ready event if recording finalization succeeds.
 
 ## Worker / shell / daemon responsibilities
 
@@ -41,48 +46,51 @@ when balance can't sustain it.
 |---|---|---|
 | Per-session state machine | worker | `apps/transcode-worker-node/internal/service/liverunner` |
 | `seq` counter persistence | worker | BoltDB via `repo/jobs.IncrementDebitSeq`; survives worker restart |
-| OpenStreamingSession / DebitStreamingSession / TopUpStreamingSession / CloseStreamingSession gRPC | worker | calls into co-located `payment-daemon` (receiver) |
-| Project balance lookup + topup authorization | shell | `/internal/live/topup` |
-| Per-second cost basis (`liveCentsPerSecond`) | shell | engine `PricingConfig` |
-| Reservation row lifecycle (`streaming` → `committed`/`refunded`) | shell | `service/live/postgresAdapters.createPostgresReservationOps` |
-| Stale-stream watchdog (worker silent > 90s) | shell | `service/live/staleStreamSweeper` |
+| `ProcessPayment` / `DebitBalance` / `SufficientBalance` / `CloseSession` | worker | calls into co-located `payment-daemon` (receiver) |
+| Project balance lookup + topup authorization | gateway | decides whether to mint additional payment credit |
+| Per-second cost basis (`liveCentsPerSecond`) | gateway | pricing/offering logic |
+| Customer billing ledger lifecycle | gateway | derived from accepted worker `session.usage.tick` events |
+| Session correlation + usage event ingest | gateway | canonical Pattern B event-ingest path |
 
 ## Tick math
 
+The canonical unit is stream seconds. The worker debits whole-second
+units locally and emits `session.usage.tick` with the accepted debit:
+
 ```
-debitCents       = ceil(debitSeconds * pricing.liveCentsPerSecond)
-runwaySeconds    = floor(remainingBalanceCents / pricing.liveCentsPerSecond)
-graceTriggered   = remainingBalanceCents <= 0
+units             = ceil(encodedSecondsDelta)
+runwayThreshold   = 30 seconds
+graceWindow       = 60 seconds
 ```
 
-The shell's session-tick handler atomically decrements `app.balances.balance_cents`
-by `debitCents`, clamps at 0 (so a race never creates negative balance),
-and returns the post-decrement runway to the worker. Tick sequence is
-idempotent: a replayed `seq` returns the current state without
-double-debiting.
+Customer-facing billing may still be presented in minutes, but the
+worker/gateway contract stays second-based for tick precision, runway
+checks, and idempotent replay handling.
 
 ## Grace semantics
 
-Grace starts when a tick reports `graceTriggered=true` AND a topup attempt
-failed. The worker holds the encoder running for `stream_grace_seconds`
-(default 60s); if balance recovers above runway threshold within grace,
-the deadline clears. If grace expires, the worker calls
-`/internal/live/session-ended` with `reason: 'insufficient_balance'`,
-the encoder is killed, and the stream transitions to `errored`.
+Grace starts when the worker detects insufficient receiver-side runway.
+The worker holds the encoder running for `stream_grace_seconds`
+(default 60s); if fresh credit lands before grace expires, the deadline
+clears and the worker emits `session.balance.refilled`. If grace
+expires, the worker ends the runtime session with
+`reason: 'insufficient_balance'`.
 
 ## Topup decoupling
 
-Per the implementation decision in plan 0006, the *gRPC* `TopUpStreamingSession`
-call lands in the worker (which holds the gRPC connection to its local
-payment-daemon receiver); the *authorization* of how much to top up is a
-shell concern (it knows the project balance). The split: shell answers
-"is there enough fiat balance for N more seconds?", worker translates a
-yes into a `TopUpStreamingSession` against its co-located receiver. End-
-to-end shell-mediated TopUp is tech-debt.
+The topup split is now explicit:
+
+- gateway answers "can this customer's USD balance continue funding the stream?"
+- gateway mints direct payment credit when the answer is yes
+- worker applies that payment to the existing `work_id`
+
+The worker should never expose ETH/ticket depletion directly to
+customers. Gateway-facing low-balance is an internal operational signal;
+customer-facing low-balance is derived from USD-side funding state.
 
 ## Cross-references
 
-- [`live-state-machine.md`](live-state-machine.md) — where in the lifecycle each step happens.
-- [`internal-callback-api.md`](internal-callback-api.md) — wire format for the worker → shell side of this pattern.
-- [`payment-integration.md`](payment-integration.md) — VOD reserve→commit (the other half of the engine's payment surface).
+- [`live-state-machine.md`](live-state-machine.md) — legacy shell-side lifecycle; pending rewrite to Pattern B event semantics.
+- [`internal-callback-api.md`](internal-callback-api.md) — legacy callback taxonomy retained only while the gateway rewrite is in flight.
+- [`payment-integration.md`](payment-integration.md) — VOD reserve→commit and live payment split.
 - `livepeer-modules/payment-daemon/` — the daemon that implements the underlying primitive.
