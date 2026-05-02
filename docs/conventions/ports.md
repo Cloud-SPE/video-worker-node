@@ -35,7 +35,7 @@ top-level [`DESIGN.md`](../../DESIGN.md) §"Trust boundaries".
 
 | Path | Owner | Notes |
 |---|---|---|
-| `/var/run/livepeer-payment-daemon.sock` | shell host (sender mode) and worker host (receiver mode) | same path, different hosts |
+| `/var/run/livepeer/payment.sock` | shell host (sender mode) and worker host (receiver mode) | current published payment-daemon socket convention; same path, different hosts |
 | `/var/run/livepeer-video-worker.sock` | worker | operator gRPC |
 
 ## Reserved for future modules
@@ -46,7 +46,7 @@ ingest gateway, a future analytics ingest service, an SFU control plane).
 ## Compose vs production
 
 Local `infra/compose.yaml`:
-- exposes only what's needed for dev (`8080`, `1935`, `9094`, MinIO console
+- exposes only what's needed for dev (`8080`, `1935`, `9094`, RustFS console
   `9001`, Postgres `5432` for inspect, Grafana `3000` once landed)
 - metrics endpoints exposed for Prometheus scrape inside the compose network
 - payment socket shared via named volume

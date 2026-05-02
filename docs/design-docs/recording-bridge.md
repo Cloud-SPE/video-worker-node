@@ -27,7 +27,7 @@ keys transition**, and **what fires when**.
 
 Live segments are already H.264 / HLS / .ts files in the right shape for
 VOD playback. Re-encoding them just to relocate the bytes is wasteful.
-Instead the bridge does **server-side copy** (S3 `CopyObject` / MinIO
+Instead the bridge does **server-side copy** (S3 `CopyObject` / RustFS
 equivalent) from the live prefix to the asset prefix:
 
 ```

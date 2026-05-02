@@ -48,7 +48,7 @@ worker providers/ingest/rtmp/
 liverunner spawns FFmpeg with input = pipe:0 (FLV from ingest session)
   │
   │ FFmpeg writes HLS segments + variant playlists to storage provider
-  │ (signed PUT URLs to MinIO/S3/R2)
+  │ (signed PUT URLs to RustFS/S3/R2)
   ▼
 HLS playable at the storage prefix; shell's playback redirect serves it
 ```
@@ -69,10 +69,14 @@ entirely:
   "work_id":     "stream-xyz",
   "preset":      "h264-live",
   "webhook_url": "https://op.example.com/webhooks/worker",
-  "webhook_secret": "...",
-  "payment_ticket": "..."
+  "webhook_secret": "..."
 }
 ```
+
+Canonical payment transport for `/stream/start` and `/stream/topup` is
+the `livepeer-payment` HTTP header. The worker still tolerates body
+`payment_ticket` as a compatibility alias during the current migration,
+but docs and callers should treat the header as the real contract.
 
 Response includes the public `rtmp_url` so the operator can pre-register
 streams (advanced use case). Most flows skip `/stream/start` entirely:
