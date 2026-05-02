@@ -2,9 +2,10 @@
 id: 0003
 slug: v3-0-1-worker-contract-alignment
 title: v3.0.1 worker contract alignment
-status: in_progress
+status: completed
 owner: agent
 opened: 2026-05-01
+closed: 2026-05-02
 depends-on: 0001
 ---
 
@@ -131,11 +132,11 @@ Acceptance criteria:
 - `make test` and `make doc-lint` pass.
 
 Status:
-- In progress. Core operator-facing docs and examples have been updated
-  to the shared `worker.yaml` + `/registry/offerings` model, including
-  compose files and `AGENTS.md`. Remaining cleanup is limited to deeper
-  historical material and optional status pruning outside the active
-  operator path.
+- Completed 2026-05-02. Core operator-facing docs and examples now
+  align with the shared `worker.yaml` + `/registry/offerings` model,
+  including compose files, examples, and local-stack defaults. Any
+  remaining historical wording cleanup is non-blocking documentation
+  drift, not active contract work.
 
 ## Decisions log
 
@@ -154,9 +155,8 @@ that shape keeps the sibling workers consistent and reduces cross-repo
 drift.
 
 ## Open questions
-- Whether `/health` should include additional operator-triage fields
-  beyond the spec minimum (`mode`, version, uptime, inflight). The spec
-  permits extensions, but the shape should stay stable once chosen.
+- None blocking completion. Future `/health` field expansion would be a
+  separate surface-change plan.
 
 ## Artifacts produced
 - Shared config parser and tests:
