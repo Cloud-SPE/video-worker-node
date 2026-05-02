@@ -9,7 +9,7 @@
 # release.
 #
 # Socket layout (shared via one named volume):
-#   /var/run/livepeer-payment/daemon.sock   ← payment-daemon writes; worker reads
+#   /var/run/livepeer/payment.sock   ← payment-daemon writes; worker reads
 #
 # Bring it up with:
 #   cp worker.example.yaml worker.yaml   # then edit
@@ -26,16 +26,16 @@ name: livepeer-video-worker
 
 services:
   payment-daemon:
-    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v1.4.0}
+    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v3.0.2}
     command:
       - "--mode=receiver"
-      - "--socket=/var/run/livepeer-payment/daemon.sock"
+      - "--socket=/var/run/livepeer/payment.sock"
       - "--store-path=/var/lib/livepeer/payment-daemon.db"
       - "--config=/etc/livepeer/worker.yaml"
       - "--log-level=info"
     volumes:
       - ./worker.yaml:/etc/livepeer/worker.yaml:ro
-      - payment-sock:/var/run/livepeer-payment
+      - payment-sock:/var/run/livepeer
       - payment-data:/var/lib/livepeer
     restart: unless-stopped
 
@@ -57,7 +57,7 @@ services:
     volumes:
       - ./worker.yaml:/etc/livepeer/worker.yaml:ro
       - ./presets:/etc/livepeer/presets:ro
-      - payment-sock:/var/run/livepeer-payment:ro
+      - payment-sock:/var/run/livepeer:ro
       - worker-data:/var/lib/livepeer
     depends_on:
       - payment-daemon

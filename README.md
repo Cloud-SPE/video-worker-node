@@ -11,7 +11,7 @@ Go daemon that performs FFmpeg-subprocess transcoding (VOD / ABR / Live HLS) on 
 - **Workload-only** Go daemon. No `chain-commons`, no Stripe, no shell concerns.
 - **Three runtime modes** (`--mode=vod|abr|live`) — pick one per process.
 - **Three GPU build variants** (NVIDIA / Intel / AMD) — same source, three Docker tags.
-- **Workload contracts:** HTTP `/v1/video/*` + `/stream/*` (`:8081`), `GET /health`, `GET /registry/offerings`, RTMP ingest (`:1935`), Prometheus `/metrics` (`:9091`), and gRPC into co-located `livepeer-payment-daemon` (receiver) over a local unix socket.
+- **Workload contracts:** HTTP `/v1/video/*` + `/stream/*` (`:8081`), `GET /health`, `GET /registry/offerings`, `POST /v1/payment/ticket-params`, RTMP ingest (`:1935`), Prometheus `/metrics` (`:9091`), and gRPC into co-located `livepeer-payment-daemon` (receiver) over `/var/run/livepeer/payment.sock`.
 
 ## Where to start
 
@@ -24,11 +24,9 @@ Go daemon that performs FFmpeg-subprocess transcoding (VOD / ABR / Live HLS) on 
 ## Build & run *(placeholder — fills in after Phase 2)*
 
 ```sh
-# coming soon, mirroring openai-worker-node:
 make build              # bin/livepeer-video-worker-node
 make test               # go test ./...
-make lint               # golangci-lint + custom lints
-make doc-lint           # cross-link integrity + frontmatter freshness
+make lint               # go vet + repo lints
 make coverage-check     # 75% per-package gate
 make proto              # regenerate vendored proto stubs
 make docker-build DOCKER_TARGET=runtime-nvidia

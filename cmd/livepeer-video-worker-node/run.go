@@ -219,6 +219,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "payment client ListCapabilities: %v\n", err)
 			return 1
 		}
+		// Keep startup fail-closed on capability / work-unit / offering
+		// identity drift, but do not require the daemon to echo the
+		// exact configured prices byte-for-byte. Gateway-side face-value
+		// sizing now owns the payment amount path.
 		if err := verifyPaymentDaemonCatalog(cfg, daemonCatalog); err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return 1
@@ -339,7 +343,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	httpSrv, err := httpsurface.New(httpsurface.Config{
 		Mode: cfg.Mode, Dev: cfg.Dev, Repo: repo,
 		JobRunner: jobR, ABRRunner: abrR, LiveRunner: liveR,
-		Payment: paymentBroker, Presets: pl,
+		Payment: paymentBroker, Payee: pmtClient, Presets: pl,
 		Prober:     probe.NewSystem(),
 		APIVersion: cfg.APIVersion, ProtocolVersion: cfg.ProtocolVersion,
 		WorkerEthAddress:     cfg.WorkerEthAddress,

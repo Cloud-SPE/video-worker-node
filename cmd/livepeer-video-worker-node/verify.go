@@ -29,9 +29,6 @@ func verifyPaymentDaemonCatalog(cfg config.Config, daemon paymentclient.ListCapa
 			if want[i].Offerings[j].ID != got[i].Offerings[j].ID {
 				return fmt.Errorf("payment-daemon catalog mismatch: capability[%d] (%q) offering[%d] id worker=%q daemon=%q", i, want[i].Capability, j, want[i].Offerings[j].ID, got[i].Offerings[j].ID)
 			}
-			if want[i].Offerings[j].PricePerWorkUnitWei != got[i].Offerings[j].PricePerWorkUnitWei {
-				return fmt.Errorf("payment-daemon catalog mismatch: capability[%d] (%q) offering[%d] (%q) price worker=%q daemon=%q", i, want[i].Capability, j, want[i].Offerings[j].ID, want[i].Offerings[j].PricePerWorkUnitWei, got[i].Offerings[j].PricePerWorkUnitWei)
-			}
 		}
 	}
 	return nil
@@ -44,8 +41,7 @@ type normalizedCapability struct {
 }
 
 type normalizedOffering struct {
-	ID                  string
-	PricePerWorkUnitWei string
+	ID string
 }
 
 func normalizeConfigCapabilities(in []config.RegistryCapability) []normalizedCapability {
@@ -58,8 +54,7 @@ func normalizeConfigCapabilities(in []config.RegistryCapability) []normalizedCap
 		}
 		for _, offering := range capability.Offerings {
 			row.Offerings = append(row.Offerings, normalizedOffering{
-				ID:                  offering.ID,
-				PricePerWorkUnitWei: offering.PricePerWorkUnitWei,
+				ID: offering.ID,
 			})
 		}
 		sort.Slice(row.Offerings, func(i, j int) bool {
@@ -83,8 +78,7 @@ func normalizeDaemonCapabilities(in []paymentclient.Capability) []normalizedCapa
 		}
 		for _, offering := range capability.Offerings {
 			row.Offerings = append(row.Offerings, normalizedOffering{
-				ID:                  offering.ID,
-				PricePerWorkUnitWei: offering.PricePerWorkUnitWei,
+				ID: offering.ID,
 			})
 		}
 		sort.Slice(row.Offerings, func(i, j int) bool {

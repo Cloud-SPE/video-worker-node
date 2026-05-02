@@ -5,13 +5,24 @@ on:
   pull_request:
 
 jobs:
+  golangci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.4
+
   go-vet:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: go vet
         run: go vet ./...
 
@@ -21,7 +32,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -40,7 +51,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: verify go.mod / go.sum are tidy
         run: |
           cp go.mod go.mod.before
@@ -68,7 +79,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
@@ -82,7 +93,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: no-cgo (FFmpeg is a subprocess, never a binding)
         run: go run ./lint/no-cgo/... ./...
       - name: no-chain-commons (workload portability across payment systems)

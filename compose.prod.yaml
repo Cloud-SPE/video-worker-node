@@ -20,11 +20,11 @@ name: livepeer-video-worker
 
 services:
   payment-daemon:
-    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v1.4.0}
+    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v3.0.2}
     restart: unless-stopped
     command:
       - --mode=receiver
-      - --socket=/var/run/livepeer-payment/daemon.sock
+      - --socket=/var/run/livepeer/payment.sock
       - --store-path=/var/lib/livepeer/payment-daemon.db
       - --config=/etc/livepeer/worker.yaml
       - --chain-rpc=${CHAIN_RPC:?set CHAIN_RPC (Arbitrum One mainnet RPC URL)}
@@ -36,7 +36,7 @@ services:
       - ${WORKER_YAML_PATH:-./worker.yaml}:/etc/livepeer/worker.yaml:ro
       - ${RECIPIENT_KEYSTORE_PATH:-./keystore.json}:/etc/livepeer/keystore.json:ro
       - ${RECIPIENT_KEYSTORE_PASSWORD_PATH:-./keystore-password}:/etc/livepeer/keystore-password:ro
-      - payment-sock:/var/run/livepeer-payment
+      - payment-sock:/var/run/livepeer
       - payment-data:/var/lib/livepeer
     logging:
       driver: json-file
@@ -66,7 +66,7 @@ services:
     volumes:
       - ${WORKER_YAML_PATH:-./worker.yaml}:/etc/livepeer/worker.yaml:ro
       - ${PRESETS_PATH:-./presets}:/etc/livepeer/presets:ro
-      - payment-sock:/var/run/livepeer-payment:ro
+      - payment-sock:/var/run/livepeer:ro
       - worker-data:/var/lib/livepeer
     ports:
       # HTTP — published to the host so cloudflared (if running outside

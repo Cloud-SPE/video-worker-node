@@ -47,6 +47,33 @@ type OfferingPrice struct {
 	PricePerWorkUnitWei string
 }
 
+// GetTicketParamsRequest is the worker-side projection of the daemon's
+// exact ticket-params request.
+type GetTicketParamsRequest struct {
+	Sender     []byte
+	Recipient  []byte
+	FaceValue  *big.Int
+	Capability string
+	Offering   string
+}
+
+// TicketParams is the worker-side projection of the proto TicketParams.
+type TicketParams struct {
+	Recipient         []byte
+	FaceValueWei      []byte
+	WinProb           []byte
+	RecipientRandHash []byte
+	Seed              []byte
+	ExpirationBlock   []byte
+	ExpirationParams  TicketExpirationParams
+}
+
+// TicketExpirationParams projects payments.v1.TicketExpirationParams.
+type TicketExpirationParams struct {
+	CreationRound          int64
+	CreationRoundBlockHash []byte
+}
+
 // Open dials a payment-daemon over the given unix socket path.
 func Open(ctx context.Context, socketPath string) (*Client, error) {
 	if socketPath == "" {
@@ -97,6 +124,40 @@ func (c *Client) ListCapabilities(ctx context.Context) (ListCapabilitiesResult, 
 		})
 	}
 	return ListCapabilitiesResult{Capabilities: caps}, nil
+}
+
+// GetTicketParams proxies the receiver daemon's exact ticket-params helper.
+func (c *Client) GetTicketParams(ctx context.Context, req GetTicketParamsRequest) (TicketParams, error) {
+	faceValue := []byte(nil)
+	if req.FaceValue != nil {
+		faceValue = req.FaceValue.Bytes()
+	}
+	resp, err := c.rpc.GetTicketParams(ctx, &pmt.GetTicketParamsRequest{
+		Sender:     append([]byte(nil), req.Sender...),
+		Recipient:  append([]byte(nil), req.Recipient...),
+		FaceValue:  faceValue,
+		Capability: req.Capability,
+		Offering:   req.Offering,
+	})
+	if err != nil {
+		return TicketParams{}, err
+	}
+	tp := resp.GetTicketParams()
+	if tp == nil {
+		return TicketParams{}, errors.New("paymentclient: daemon returned nil ticket_params")
+	}
+	return TicketParams{
+		Recipient:         tp.GetRecipient(),
+		FaceValueWei:      tp.GetFaceValue(),
+		WinProb:           tp.GetWinProb(),
+		RecipientRandHash: tp.GetRecipientRandHash(),
+		Seed:              tp.GetSeed(),
+		ExpirationBlock:   tp.GetExpirationBlock(),
+		ExpirationParams: TicketExpirationParams{
+			CreationRound:          tp.GetExpirationParams().GetCreationRound(),
+			CreationRoundBlockHash: tp.GetExpirationParams().GetCreationRoundBlockHash(),
+		},
+	}, nil
 }
 
 // ProcessPayment satisfies paymentbroker.Broker.

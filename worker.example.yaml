@@ -17,28 +17,43 @@ worker_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
 # Optional bearer token for GET /registry/offerings.
 auth_token: "replace-me-or-empty"
 
-# Opaque to this worker. Present because receiver-mode payment-daemon shares
-# the same file and reads its own section from here.
+# Opaque to this worker. Receiver-mode payment-daemon owns this subtree.
+# For local fake-chain dev, switch `broker.mode` to `fake` and seed a
+# sender balance map as shown below.
 payment_daemon:
-  socket: "/var/run/livepeer-payment/daemon.sock"
+  grpc_listen: "unix:///var/run/livepeer/payment.sock"
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
+  broker:
+    mode: ethereum
+    rpc_url: "https://arb1.arbitrum.io/rpc"
+    ticket_broker_contract: "0xa8bB618B1520E284046F3dFc448851A1Ff26e41B"
+    # Dev example:
+    # mode: fake
+    # fake_sender_balances_wei:
+    #   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "1000000000000000000"
 
 worker:
   http_listen: ":8081"
-  payment_daemon_socket: "/var/run/livepeer-payment/daemon.sock"
+  payment_daemon_socket: "/var/run/livepeer/payment.sock"
 
 capabilities:
   - capability: "video:transcode.vod"
     work_unit: "video_frame_megapixel"
-    extra:
-      hardware_accel: "nvenc"
+    # Optional opaque capability metadata. Keep commented unless the
+    # co-located payment-daemon version you're running accepts it too.
+    # extra:
+    #   hardware_accel: "nvenc"
     offerings:
       - id: "h264-1080p"
         price_per_work_unit_wei: "1250000"
         backend_url: "http://127.0.0.1:9000"
-        constraints:
-          preset: "h264-1080p"
-          max_input_resolution: "4K"
-          codec: "h264"
+        # Optional opaque per-offering metadata. Keep commented unless
+        # the co-located payment-daemon version you're running accepts
+        # it too.
+        # constraints:
+        #   preset: "h264-1080p"
+        #   max_input_resolution: "4K"
+        #   codec: "h264"
 
   - capability: "video:transcode.abr"
     work_unit: "video_frame_megapixel"
@@ -46,9 +61,9 @@ capabilities:
       - id: "abr-1080p"
         price_per_work_unit_wei: "2500000"
         backend_url: "http://127.0.0.1:9000"
-        constraints:
-          preset: "abr-1080p"
-          ladder: "1080p"
+        # constraints:
+        #   preset: "abr-1080p"
+        #   ladder: "1080p"
 
   - capability: "video:live.rtmp"
     work_unit: "video_frame_megapixel"
@@ -56,6 +71,6 @@ capabilities:
       - id: "live-1080p30"
         price_per_work_unit_wei: "3000000"
         backend_url: "http://127.0.0.1:9001"
-        constraints:
-          preset: "live-1080p30"
-          fps: 30
+        # constraints:
+        #   preset: "live-1080p30"
+        #   fps: 30

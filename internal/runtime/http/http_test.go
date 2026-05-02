@@ -16,12 +16,30 @@ import (
 	"testing"
 
 	"github.com/Cloud-SPE/video-worker-node/internal/config"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/store"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/liverunner"
+	"github.com/Cloud-SPE/video-worker-node/internal/service/paymentbroker"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/presetloader"
 	"github.com/Cloud-SPE/video-worker-node/internal/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+type fakeTicketParamsClient struct {
+	params paymentclient.TicketParams
+	err    error
+	last   paymentclient.GetTicketParamsRequest
+}
+
+func (f *fakeTicketParamsClient) GetTicketParams(_ context.Context, req paymentclient.GetTicketParamsRequest) (paymentclient.TicketParams, error) {
+	f.last = req
+	if f.err != nil {
+		return paymentclient.TicketParams{}, f.err
+	}
+	return f.params, nil
+}
 
 func newTestServer(t *testing.T, mode types.Mode) *Server {
 	t.Helper()
@@ -224,6 +242,205 @@ func TestRegistryOfferingsAuthToken(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authorized status=%d", rec.Code)
 	}
+}
+
+func TestHandleVODSubmitAcceptsPaymentHeader(t *testing.T) {
+	repo := jobs.New(store.Memory())
+	pl := mustTestPresets(t)
+	srv, err := New(Config{
+		Mode:    types.ModeVOD,
+		Dev:     false,
+		Repo:    repo,
+		Presets: pl,
+		Payment: paymentbroker.NewFake(),
+	})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/video/transcode", strings.NewReader(`{
+		"job_id":"job_1",
+		"input_url":"https://example.com/in.mp4",
+		"output_url":"s3://bucket/out.m3u8",
+		"preset":"720p",
+		"work_id":"job_1"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(paymentHeaderName, "AQID")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no_runner") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestHandleVODSubmitRequiresPaymentWhenBrokerWired(t *testing.T) {
+	repo := jobs.New(store.Memory())
+	pl := mustTestPresets(t)
+	srv, err := New(Config{
+		Mode:    types.ModeVOD,
+		Dev:     false,
+		Repo:    repo,
+		Presets: pl,
+		Payment: paymentbroker.NewFake(),
+	})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/video/transcode", strings.NewReader(`{
+		"job_id":"job_1",
+		"input_url":"https://example.com/in.mp4",
+		"output_url":"s3://bucket/out.m3u8",
+		"preset":"720p",
+		"work_id":"job_1"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleStreamStatusAcceptsStreamID(t *testing.T) {
+	srv := newTestServer(t, types.ModeLive)
+	if err := srv.repo.SaveStream(context.Background(), types.Stream{
+		WorkID: "live_1",
+		Phase:  types.StreamPhaseStreaming,
+	}); err != nil {
+		t.Fatalf("save stream: %v", err)
+	}
+
+	statusRec := httptest.NewRecorder()
+	statusReq := httptest.NewRequest("POST", "/stream/status", strings.NewReader(`{"stream_id":"live_1"}`))
+	statusReq.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+}
+
+func TestHandleTicketParamsProxy(t *testing.T) {
+	payee := &fakeTicketParamsClient{
+		params: paymentclient.TicketParams{
+			Recipient:         []byte{0xaa, 0xbb},
+			FaceValueWei:      []byte{0x7b},
+			WinProb:           []byte{0x10},
+			RecipientRandHash: []byte{0x20},
+			Seed:              []byte{0x30},
+			ExpirationBlock:   []byte{0x01, 0x00},
+			ExpirationParams: paymentclient.TicketExpirationParams{
+				CreationRound:          42,
+				CreationRoundBlockHash: []byte{0xcc},
+			},
+		},
+	}
+
+	repo := jobs.New(store.Memory())
+	pl := mustTestPresets(t)
+	srv, err := New(Config{
+		Mode:      types.ModeVOD,
+		Dev:       false,
+		Repo:      repo,
+		Presets:   pl,
+		Payee:     payee,
+		AuthToken: "secret",
+	})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/payment/ticket-params", strings.NewReader(`{
+		"sender_eth_address":"0x1111111111111111111111111111111111111111",
+		"recipient_eth_address":"0x2222222222222222222222222222222222222222",
+		"face_value_wei":"123",
+		"capability":"video:transcode.vod",
+		"offering":"h264-720p"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if payee.last.Capability != "video:transcode.vod" || payee.last.Offering != "h264-720p" {
+		t.Fatalf("unexpected request: %+v", payee.last)
+	}
+	var body map[string]map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	ticket := body["ticket_params"]
+	if ticket["recipient"] != "0xaabb" {
+		t.Fatalf("recipient=%v", ticket["recipient"])
+	}
+	if ticket["face_value"] != "123" {
+		t.Fatalf("face_value=%v", ticket["face_value"])
+	}
+}
+
+func TestHandleTicketParamsProxyMapsDaemonUnavailable(t *testing.T) {
+	repo := jobs.New(store.Memory())
+	pl := mustTestPresets(t)
+	srv, err := New(Config{
+		Mode:    types.ModeVOD,
+		Dev:     false,
+		Repo:    repo,
+		Presets: pl,
+		Payee: &fakeTicketParamsClient{
+			err: status.Error(codes.Unavailable, "daemon down"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/payment/ticket-params", strings.NewReader(`{
+		"sender_eth_address":"0x1111111111111111111111111111111111111111",
+		"recipient_eth_address":"0x2222222222222222222222222222222222222222",
+		"face_value_wei":"123",
+		"capability":"video:transcode.vod",
+		"offering":"h264-720p"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "payment_daemon_unavailable") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func mustTestPresets(t *testing.T) *presetloader.Loader {
+	t.Helper()
+	presetYAML := []byte(`presets:
+  - name: 720p
+    codec: h264
+    width_max: 1280
+    height_max: 720
+    bitrate_kbps: 2800
+`)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "preset.yaml")
+	if err := os.WriteFile(path, presetYAML, 0o644); err != nil {
+		t.Fatalf("preset write: %v", err)
+	}
+	pl, err := presetloader.New(path)
+	if err != nil {
+		t.Fatalf("presets: %v", err)
+	}
+	return pl
 }
 
 // silence "imported and not used" if context becomes unused.

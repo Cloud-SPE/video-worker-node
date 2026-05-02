@@ -2,6 +2,7 @@ package paymentclient
 
 import (
 	"context"
+	"math/big"
 	"net"
 	"path/filepath"
 	"testing"
@@ -18,6 +19,7 @@ type fakeServer struct {
 	pmt.UnimplementedPayeeDaemonServer
 	processCalls int
 	debitCalls   int
+	nilTicket    bool
 }
 
 func (s *fakeServer) ListCapabilities(_ context.Context, _ *pmt.ListCapabilitiesRequest) (*pmt.ListCapabilitiesResponse, error) {
@@ -45,6 +47,26 @@ func (s *fakeServer) ProcessPayment(_ context.Context, req *pmt.ProcessPaymentRe
 	return &pmt.ProcessPaymentResponse{
 		Sender: []byte("sender"), CreditedEv: []byte{1}, Balance: []byte{2},
 		WinnersQueued: 1,
+	}, nil
+}
+
+func (s *fakeServer) GetTicketParams(_ context.Context, req *pmt.GetTicketParamsRequest) (*pmt.GetTicketParamsResponse, error) {
+	if s.nilTicket {
+		return &pmt.GetTicketParamsResponse{}, nil
+	}
+	return &pmt.GetTicketParamsResponse{
+		TicketParams: &pmt.TicketParams{
+			Recipient:         append([]byte(nil), req.GetRecipient()...),
+			FaceValue:         append([]byte(nil), req.GetFaceValue()...),
+			WinProb:           []byte{0x01},
+			RecipientRandHash: []byte{0x02},
+			Seed:              []byte{0x03},
+			ExpirationBlock:   []byte{0x04},
+			ExpirationParams: &pmt.TicketExpirationParams{
+				CreationRound:          7,
+				CreationRoundBlockHash: []byte{0x05},
+			},
+		},
 	}, nil
 }
 
@@ -122,6 +144,22 @@ func TestClientHappyPath(t *testing.T) {
 	if catalog.Capabilities[0].Offerings[0].PricePerWorkUnitWei != "1250000" {
 		t.Fatalf("price=%q", catalog.Capabilities[0].Offerings[0].PricePerWorkUnitWei)
 	}
+	ticketParams, err := c.GetTicketParams(context.Background(), GetTicketParamsRequest{
+		Sender:     []byte{0x10},
+		Recipient:  []byte{0x20},
+		FaceValue:  big.NewInt(123),
+		Capability: "video:transcode.vod",
+		Offering:   "h264-1080p",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := new(big.Int).SetBytes(ticketParams.FaceValueWei).String(); got != "123" {
+		t.Fatalf("face_value=%s", got)
+	}
+	if ticketParams.ExpirationParams.CreationRound != 7 {
+		t.Fatalf("creation_round=%d", ticketParams.ExpirationParams.CreationRound)
+	}
 }
 
 func TestOpenEmptySocket(t *testing.T) {
@@ -158,4 +196,23 @@ func TestInsecureCreds(t *testing.T) {
 	// Sanity: credentials.insecure is ok for unix-socket.
 	t.Parallel()
 	_ = insecure.NewCredentials()
+}
+
+func TestGetTicketParamsNilTicketParams(t *testing.T) {
+	t.Parallel()
+	sock, fs, stop := startFake(t)
+	fs.nilTicket = true
+	defer stop()
+	c, err := Open(context.Background(), sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, err = c.GetTicketParams(context.Background(), GetTicketParamsRequest{
+		Recipient: []byte{0x20},
+		FaceValue: big.NewInt(1),
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
 }

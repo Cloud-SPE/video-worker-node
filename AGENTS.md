@@ -55,7 +55,7 @@ Same source, three Docker targets: `runtime-nvidia`, `runtime-intel`, `runtime-a
 
 ## Toolchain
 
-- Go 1.24+ (matches lifted source)
+- Go 1.25+ (matches sibling worker baseline)
 - `buf` for regenerating proto stubs (`make proto`); sources live in `proto/livepeer/`
 - `golangci-lint` + custom lints in `lint/`
 - FFmpeg as a subprocess — never linked, never bound (no cgo)

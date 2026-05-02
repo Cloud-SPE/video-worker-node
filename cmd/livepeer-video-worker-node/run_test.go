@@ -207,13 +207,13 @@ func TestVerifyPaymentDaemonCatalogDetectsMismatch(t *testing.T) {
 				Capability: "video:transcode.vod",
 				WorkUnit:   "video_frame_megapixel",
 				Offerings: []paymentclient.OfferingPrice{
-					{ID: "h264-1080p", PricePerWorkUnitWei: "777"},
+					{ID: "h264-720p", PricePerWorkUnitWei: "777"},
 				},
 			},
 		},
 	}
 	err := verifyPaymentDaemonCatalog(cfg, daemon)
-	if err == nil || !strings.Contains(err.Error(), "price worker=") {
+	if err == nil || !strings.Contains(err.Error(), "offering[0] id worker=") {
 		t.Fatalf("err=%v", err)
 	}
 }

@@ -6,7 +6,7 @@
 
 `livepeer-video-worker-node` is the payee-side video adapter in the Livepeer BYOC payment architecture. It accepts transcode requests over HTTP (or persistent RTMP ingest for live mode), validates the attached payment via a co-located `livepeer-payment-daemon` (receiver mode), spawns FFmpeg as a subprocess, writes HLS output to S3-compatible storage, and reports completion via signed webhooks back to whichever shell dispatched the work.
 
-There is no transcoding network, no orchestrator pool, no on-chain interaction in this process. The worker exposes `GET /registry/offerings` for orch-coordinator scrape and is known-to-be-paid-for only through the `livepeer-payment` HTTP header.
+There is no transcoding network, no orchestrator pool, no on-chain interaction in this process. The worker exposes `GET /registry/offerings` for orch-coordinator scrape, accepts paid work through the `livepeer-payment` HTTP header, and exposes `POST /v1/payment/ticket-params` as a thin authenticated proxy to the co-located receiver daemon's `GetTicketParams` RPC.
 
 The worker is **workload-only**: portable across payment systems, agnostic to which shell consumes it, with zero customer-facing concepts (API keys, projects, billing, customer webhooks all live in the shell).
 
@@ -165,6 +165,7 @@ Endpoints exposed (defined in `docs/product-specs/http-api.md`, lifts in Phase 3
 
 - `GET /health` — liveness + `protocol_version` + `inflight`
 - `GET /registry/offerings` — suite-wide worker advertisement surface
+- `POST /v1/payment/ticket-params` — authenticated payee-side ticket-params helper
 - `POST /v1/video/transcode` — VOD work, paid
 - `POST /v1/video/transcode/abr` — ABR ladder work, paid
 - `POST /stream/start` — open a live session, paid

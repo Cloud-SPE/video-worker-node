@@ -110,21 +110,21 @@ protocol_version: 1
 worker_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
 auth_token: "orch-token"
 payment_daemon:
-  socket: "/var/run/payment.sock"
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
+  broker:
+    mode: fake
+    fake_sender_balances_wei:
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "1000000000000000000"
 worker:
   http_listen: ":8081"
   payment_daemon_socket: "/var/run/payment.sock"
 capabilities:
   - capability: "video:transcode.vod"
     work_unit: video_frame_megapixel
-    extra:
-      vendor: nvenc
     offerings:
       - id: "h264-1080p"
         price_per_work_unit_wei: "1250000"
         backend_url: "http://127.0.0.1:9000"
-        constraints:
-          preset: "h264-1080p"
 `)
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatalf("write worker.yaml: %v", err)
@@ -160,7 +160,7 @@ func TestLoadSharedWorkerRejectsLegacyCapabilityName(t *testing.T) {
 	body := []byte(`
 protocol_version: 1
 payment_daemon:
-  socket: "/var/run/payment.sock"
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
 worker:
   http_listen: ":8081"
   payment_daemon_socket: "/var/run/payment.sock"
@@ -188,7 +188,7 @@ func TestLoadSharedWorkerRejectsServiceRegistryPublisher(t *testing.T) {
 	body := []byte(`
 protocol_version: 1
 payment_daemon:
-  socket: "/var/run/payment.sock"
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
 worker:
   http_listen: ":8081"
   payment_daemon_socket: "/var/run/payment.sock"
@@ -218,7 +218,7 @@ func TestLoadSharedWorkerRejectsUnsupportedProtocolVersion(t *testing.T) {
 	body := []byte(`
 protocol_version: 2
 payment_daemon:
-  socket: "/var/run/payment.sock"
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
 worker:
   http_listen: ":8081"
   payment_daemon_socket: "/var/run/payment.sock"

@@ -1,0 +1,89 @@
+name: Docker
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'compose.yaml'
+      - 'compose.prod.yaml'
+      - '.github/workflows/docker.yml'
+      - 'cmd/**'
+      - 'internal/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: tztcloud
+  IMAGE: livepeer-video-worker-node
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      stable: ${{ steps.s.outputs.stable }}
+    steps:
+      - id: s
+        run: |
+          if [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: build${{ startsWith(github.ref, 'refs/tags/v') && ' + push' || '' }} · ${{ matrix.target }}
+    needs: meta
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [runtime-nvidia, runtime-intel, runtime-amd]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          suffix="${{ matrix.target }}"
+          suffix="${suffix#runtime-}"
+          image="${REGISTRY}/${IMAGE}-${suffix}"
+
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            echo "tags=${image}:pr-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ref="${GITHUB_REF#refs/tags/}"
+          tags="${image}:${ref}"
+          if [[ "${{ needs.meta.outputs.stable }}" == "true" ]]; then
+            major_minor="$(echo "$ref" | sed -E 's/^v([0-9]+\.[0-9]+)\.[0-9]+$/\1/')"
+            tags="${tags},${image}:${major_minor},${image}:latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "push=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build${{ startsWith(github.ref, 'refs/tags/v') && ' + push' || '' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: ${{ matrix.target }}
+          push: ${{ steps.tags.outputs.push }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

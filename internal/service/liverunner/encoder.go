@@ -42,8 +42,7 @@ var ErrEncoderExited = errors.New("liverunner: encoder exited")
 // ctx cancellation, ticking EncodedSeconds at a configurable wall-clock
 // rate. Used as the default at §C — the real FFmpeg encoder lands in §D.
 type drainEncoder struct {
-	wallClockTickHz uint64
-	processed       atomic.Uint64 // tenths of a second
+	processed atomic.Uint64 // tenths of a second
 }
 
 // NewDrainEncoder returns an Encoder that simply consumes its input and

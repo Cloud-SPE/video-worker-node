@@ -12,7 +12,7 @@ livepeer-video-worker-node \
   --store-path=/var/lib/livepeer/transcode-state.db \
   --grpc-socket=/var/run/livepeer-video-worker.sock \
   --metrics-listen=:9091 \
-  --payment-socket=/var/run/livepeer-payment-daemon.sock
+  --payment-socket=/var/run/livepeer/payment.sock
 ```
 
 ## Modes
@@ -37,7 +37,7 @@ livepeer-video-worker-node \
   --stream-pre-credit-seconds=60 \
   --stream-restart-limit=3 \
   --stream-topup-min-interval=5s \
-  --payment-socket=/var/run/livepeer-payment-daemon.sock
+  --payment-socket=/var/run/livepeer/payment.sock
 ```
 
 Broadcasters connect to `rtmp://transcode.example.com:1935/live/{stream_key}`.
@@ -64,11 +64,16 @@ make docker-build DOCKER_TARGET=runtime-amd    DOCKER_TAG=dev
 The worker expects the payment-daemon unix socket at the configured path:
 - `--payment-socket` — `payment-daemon` (receiver mode), co-located on the same host.
 
+Current compose/examples in this repo use `/var/run/livepeer/payment.sock`
+to match the published daemon image's current socket convention.
+
 The worker reads shared `worker.yaml` via `--config` for its `worker`
 section, optional top-level `auth_token`, optional top-level
 `worker_eth_address`, and capability `offerings[]`. `payment_daemon:`
-is shared with the co-located receiver daemon, but this worker only
-consumes its own worker-facing fields plus the capability catalog.
+is owned by the co-located receiver daemon and should follow that
+daemon's current schema (`recipient_eth_address`, `broker`, etc.). This
+worker only requires the block to exist; it does not interpret those
+daemon-specific fields itself.
 
 `payment-daemon` is sourced from `livepeer-modules` and runs as a
 separate process. The worker NEVER speaks chain RPC directly.
@@ -94,6 +99,7 @@ result into the operator-confirmed roster. See
 |---|---|---|
 | `GET /health` | `:8081` | Liveness + mode + active stream count |
 | `GET /registry/offerings` | `:8081` | Suite-wide capability advertisement for orch-coordinator scrape |
+| `POST /v1/payment/ticket-params` | `:8081` | Bearer-authenticated helper that proxies receiver-side `GetTicketParams` |
 | `GET /metrics` | `:9091` (off by default) | Prometheus; prefix `livepeer_videoworker_*` |
 | Operator gRPC | unix socket | `--grpc-socket=/var/run/...` |
 

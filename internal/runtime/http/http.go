@@ -13,13 +13,18 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
+	"strings"
 
 	"github.com/Cloud-SPE/video-worker-node/internal/config"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/probe"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/abrrunner"
@@ -28,7 +33,16 @@ import (
 	"github.com/Cloud-SPE/video-worker-node/internal/service/paymentbroker"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/presetloader"
 	"github.com/Cloud-SPE/video-worker-node/internal/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+const paymentHeaderName = "livepeer-payment"
+const maxTicketParamsBodyBytes = 8 << 10 // 8 KiB
+
+type ticketParamsClient interface {
+	GetTicketParams(context.Context, paymentclient.GetTicketParamsRequest) (paymentclient.TicketParams, error)
+}
 
 // Server is the HTTP entry layer.
 type Server struct {
@@ -39,6 +53,7 @@ type Server struct {
 	abrRunner          *abrrunner.Runner
 	liveRunner         *liverunner.Runner
 	payment            paymentbroker.Broker
+	payee              ticketParamsClient
 	presets            *presetloader.Loader
 	prober             probe.Prober
 	apiVersion         int32
@@ -60,6 +75,7 @@ type Config struct {
 	ABRRunner            *abrrunner.Runner
 	LiveRunner           *liverunner.Runner
 	Payment              paymentbroker.Broker
+	Payee                ticketParamsClient
 	Presets              *presetloader.Loader
 	Prober               probe.Prober
 	APIVersion           int32
@@ -86,7 +102,7 @@ func New(cfg Config) (*Server, error) {
 	return &Server{
 		mode: cfg.Mode, dev: cfg.Dev, repo: cfg.Repo,
 		jobRunner: cfg.JobRunner, abrRunner: cfg.ABRRunner, liveRunner: cfg.LiveRunner,
-		payment: cfg.Payment, presets: cfg.Presets, prober: cfg.Prober,
+		payment: cfg.Payment, payee: cfg.Payee, presets: cfg.Presets, prober: cfg.Prober,
 		apiVersion:         cfg.APIVersion,
 		protocolVersion:    cfg.ProtocolVersion,
 		workerEthAddress:   cfg.WorkerEthAddress,
@@ -103,6 +119,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /registry/offerings", s.handleRegistryOfferings)
+	mux.HandleFunc("POST /v1/payment/ticket-params", s.handleTicketParams)
 	mux.HandleFunc("GET /v1/video/transcode/presets", s.handleListPresets)
 	mux.HandleFunc("POST /v1/video/transcode/probe", s.handleProbe)
 	mux.HandleFunc("POST /v1/video/transcode", s.handleVODSubmit)
@@ -132,13 +149,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleRegistryOfferings(w http.ResponseWriter, r *http.Request) {
-	if s.offeringsAuthToken != "" {
-		got := r.Header.Get("Authorization")
-		want := "Bearer " + s.offeringsAuthToken
-		if len(got) != len(want) || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
-			return
-		}
+	if !s.requireBearerAuth(w, r) {
+		return
 	}
 	caps := make([]map[string]any, 0, len(s.registryCaps))
 	for _, capability := range s.registryCaps {
@@ -167,6 +179,72 @@ func (s *Server) handleRegistryOfferings(w http.ResponseWriter, r *http.Request)
 		resp["worker_eth_address"] = s.workerEthAddress
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type ticketParamsRequest struct {
+	SenderETHAddress    string `json:"sender_eth_address"`
+	RecipientETHAddress string `json:"recipient_eth_address"`
+	FaceValueWei        string `json:"face_value_wei"`
+	Capability          string `json:"capability"`
+	Offering            string `json:"offering"`
+}
+
+type ticketParamsResponse struct {
+	TicketParams ticketParamsJSON `json:"ticket_params"`
+}
+
+type ticketParamsJSON struct {
+	Recipient         string                     `json:"recipient"`
+	FaceValue         string                     `json:"face_value"`
+	WinProb           string                     `json:"win_prob"`
+	RecipientRandHash string                     `json:"recipient_rand_hash"`
+	Seed              string                     `json:"seed"`
+	ExpirationBlock   string                     `json:"expiration_block"`
+	ExpirationParams  ticketExpirationParamsJSON `json:"expiration_params"`
+}
+
+type ticketExpirationParamsJSON struct {
+	CreationRound          int64  `json:"creation_round"`
+	CreationRoundBlockHash string `json:"creation_round_block_hash"`
+}
+
+func (s *Server) handleTicketParams(w http.ResponseWriter, r *http.Request) {
+	if !s.requireBearerAuth(w, r) {
+		return
+	}
+	if s.payee == nil {
+		writeError(w, http.StatusServiceUnavailable, "payment_daemon_unavailable", "ticket params are not wired")
+		return
+	}
+	defer func() { _ = r.Body.Close() }()
+
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTicketParamsBodyBytes))
+	dec.DisallowUnknownFields()
+
+	var req ticketParamsRequest
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
+		return
+	}
+	if err := ensureSingleJSONDocument(dec); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	daemonReq, err := parseTicketParamsRequest(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	params, err := s.payee.GetTicketParams(r.Context(), daemonReq)
+	if err != nil {
+		s.writeTicketParamsProxyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ticketParamsResponse{
+		TicketParams: renderTicketParamsJSON(params),
+	})
 }
 
 func (s *Server) handleListPresets(w http.ResponseWriter, _ *http.Request) {
@@ -252,7 +330,7 @@ func (s *Server) handleVODSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_fields", "job_id, input_url, output_url, preset are required")
 		return
 	}
-	sender, balance, code := s.maybeProcessPayment(r.Context(), req.PaymentTicket, req.WorkID)
+	sender, balance, code := s.maybeProcessPayment(r.Context(), r, req.PaymentTicket, req.WorkID)
 	if code != 0 {
 		writeError(w, code, "payment", "ticket validation failed")
 		return
@@ -331,7 +409,7 @@ func (s *Server) handleABRSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_fields", "job_id, input_url, presets are required")
 		return
 	}
-	sender, balance, code := s.maybeProcessPayment(r.Context(), req.PaymentTicket, req.WorkID)
+	sender, balance, code := s.maybeProcessPayment(r.Context(), r, req.PaymentTicket, req.WorkID)
 	if code != 0 {
 		writeError(w, code, "payment", "ticket validation failed")
 		return
@@ -385,7 +463,8 @@ func (s *Server) handleABRStatus(w http.ResponseWriter, r *http.Request) {
 // to expect a stream with this work_id + payment ticket. Plan 0006 may
 // further refine this shape (or move it shell-side entirely).
 type StreamStartRequest struct {
-	WorkID        string `json:"work_id"`
+	WorkID        string `json:"work_id,omitempty"`
+	StreamID      string `json:"stream_id,omitempty"`
 	Preset        string `json:"preset"`
 	WebhookURL    string `json:"webhook_url,omitempty"`
 	WebhookSecret string `json:"webhook_secret,omitempty"`
@@ -394,9 +473,10 @@ type StreamStartRequest struct {
 
 // StreamStartResponse returns the RTMP URL the broadcaster should connect to.
 type StreamStartResponse struct {
-	WorkID  string       `json:"work_id"`
-	RTMPURL string       `json:"rtmp_url"`
-	Stream  types.Stream `json:"stream"`
+	WorkID   string       `json:"work_id,omitempty"`
+	StreamID string       `json:"stream_id,omitempty"`
+	RTMPURL  string       `json:"rtmp_url"`
+	Stream   types.Stream `json:"stream"`
 }
 
 func (s *Server) handleStreamStart(w http.ResponseWriter, r *http.Request) {
@@ -409,21 +489,26 @@ func (s *Server) handleStreamStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
 		return
 	}
-	if req.WorkID == "" || req.Preset == "" {
-		writeError(w, http.StatusBadRequest, "missing_fields", "work_id, preset required")
+	workID := firstNonEmpty(req.WorkID, req.StreamID)
+	if workID == "" || req.Preset == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "work_id or stream_id, and preset are required")
 		return
 	}
 	if s.liveRunner == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_runner", "live runner is not wired")
 		return
 	}
-	ticket, err := decodeTicket(req.PaymentTicket)
+	ticket, code, err := s.decodeRequestPayment(r, req.PaymentTicket, s.payment != nil && !s.dev)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_ticket", err.Error())
+		if code == http.StatusPaymentRequired {
+			writeError(w, code, "payment", "missing payment ticket")
+			return
+		}
+		writeError(w, code, "bad_ticket", err.Error())
 		return
 	}
 	stream, err := s.liveRunner.Start(r.Context(), liverunner.StartRequest{
-		WorkID: req.WorkID, PaymentTicket: ticket, Preset: req.Preset,
+		WorkID: workID, PaymentTicket: ticket, Preset: req.Preset,
 		WebhookURL: req.WebhookURL, WebhookSecret: req.WebhookSecret,
 	})
 	if err != nil {
@@ -442,15 +527,17 @@ func (s *Server) handleStreamStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, StreamStartResponse{
-		WorkID:  req.WorkID,
-		RTMPURL: s.publicRTMP,
-		Stream:  stream,
+		WorkID:   workID,
+		StreamID: workID,
+		RTMPURL:  s.publicRTMP,
+		Stream:   stream,
 	})
 }
 
 // StreamStopRequest is the body for POST /stream/stop.
 type StreamStopRequest struct {
-	WorkID string `json:"work_id"`
+	WorkID   string `json:"work_id,omitempty"`
+	StreamID string `json:"stream_id,omitempty"`
 }
 
 func (s *Server) handleStreamStop(w http.ResponseWriter, r *http.Request) {
@@ -463,7 +550,12 @@ func (s *Server) handleStreamStop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
 		return
 	}
-	if err := s.liveRunner.Stop(r.Context(), req.WorkID); err != nil {
+	workID := firstNonEmpty(req.WorkID, req.StreamID)
+	if workID == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "work_id or stream_id is required")
+		return
+	}
+	if err := s.liveRunner.Stop(r.Context(), workID); err != nil {
 		var je *types.JobError
 		if errors.As(err, &je) && je.Code == types.ErrCodeStreamNotFound {
 			writeError(w, http.StatusNotFound, je.Code, je.Message)
@@ -477,8 +569,9 @@ func (s *Server) handleStreamStop(w http.ResponseWriter, r *http.Request) {
 
 // StreamTopupRequest is the body for POST /stream/topup.
 type StreamTopupRequest struct {
-	WorkID        string `json:"work_id"`
-	PaymentTicket string `json:"payment_ticket"`
+	WorkID        string `json:"work_id,omitempty"`
+	StreamID      string `json:"stream_id,omitempty"`
+	PaymentTicket string `json:"payment_ticket,omitempty"`
 }
 
 func (s *Server) handleStreamTopup(w http.ResponseWriter, r *http.Request) {
@@ -491,12 +584,21 @@ func (s *Server) handleStreamTopup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
 		return
 	}
-	ticket, err := decodeTicket(req.PaymentTicket)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_ticket", err.Error())
+	workID := firstNonEmpty(req.WorkID, req.StreamID)
+	if workID == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "work_id or stream_id is required")
 		return
 	}
-	if err := s.liveRunner.Topup(r.Context(), req.WorkID, ticket); err != nil {
+	ticket, code, err := s.decodeRequestPayment(r, req.PaymentTicket, s.payment != nil && !s.dev)
+	if err != nil {
+		if code == http.StatusPaymentRequired {
+			writeError(w, code, "payment", "missing payment ticket")
+			return
+		}
+		writeError(w, code, "bad_ticket", err.Error())
+		return
+	}
+	if err := s.liveRunner.Topup(r.Context(), workID, ticket); err != nil {
 		var je *types.JobError
 		if errors.As(err, &je) {
 			switch je.Code {
@@ -519,7 +621,8 @@ func (s *Server) handleStreamTopup(w http.ResponseWriter, r *http.Request) {
 
 // StreamStatusRequest is the body for POST /stream/status.
 type StreamStatusRequest struct {
-	WorkID string `json:"work_id"`
+	WorkID   string `json:"work_id,omitempty"`
+	StreamID string `json:"stream_id,omitempty"`
 }
 
 func (s *Server) handleStreamStatus(w http.ResponseWriter, r *http.Request) {
@@ -528,9 +631,14 @@ func (s *Server) handleStreamStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
 		return
 	}
-	stream, err := s.repo.GetStream(r.Context(), req.WorkID)
+	workID := firstNonEmpty(req.WorkID, req.StreamID)
+	if workID == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "work_id or stream_id is required")
+		return
+	}
+	stream, err := s.repo.GetStream(r.Context(), workID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, types.ErrCodeStreamNotFound, req.WorkID)
+		writeError(w, http.StatusNotFound, types.ErrCodeStreamNotFound, workID)
 		return
 	}
 	writeJSON(w, http.StatusOK, stream)
@@ -539,19 +647,52 @@ func (s *Server) handleStreamStatus(w http.ResponseWriter, r *http.Request) {
 // maybeProcessPayment runs ProcessPayment if a ticket is present and
 // payment is wired. Returns (sender, balance, statusCode). Returns
 // statusCode=0 for "ok / skipped".
-func (s *Server) maybeProcessPayment(ctx context.Context, ticketB64, workID string) ([]byte, []byte, int) {
-	if ticketB64 == "" || s.payment == nil || s.dev {
+func (s *Server) maybeProcessPayment(ctx context.Context, r *http.Request, bodyTicket, workID string) ([]byte, []byte, int) {
+	if s.payment == nil || s.dev {
 		return nil, nil, 0
 	}
-	ticket, err := decodeTicket(ticketB64)
+	ticket, code, err := s.decodeRequestPayment(r, bodyTicket, true)
 	if err != nil {
-		return nil, nil, http.StatusBadRequest
+		return nil, nil, code
 	}
-	r, err := s.payment.ProcessPayment(ctx, ticket, workID)
+	receipt, err := s.payment.ProcessPayment(ctx, ticket, workID)
 	if err != nil {
 		return nil, nil, http.StatusPaymentRequired
 	}
-	return r.Sender, r.BalanceWei, 0
+	return receipt.Sender, receipt.BalanceWei, 0
+}
+
+func (s *Server) decodeRequestPayment(r *http.Request, bodyTicket string, required bool) ([]byte, int, error) {
+	ticketB64 := paymentTicketFromRequest(r, bodyTicket)
+	if ticketB64 == "" {
+		if required {
+			return nil, http.StatusPaymentRequired, errors.New("missing payment ticket")
+		}
+		return nil, 0, nil
+	}
+	ticket, err := decodeTicket(ticketB64)
+	if err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	return ticket, 0, nil
+}
+
+func paymentTicketFromRequest(r *http.Request, bodyTicket string) string {
+	if r != nil {
+		if headerTicket := r.Header.Get(paymentHeaderName); headerTicket != "" {
+			return headerTicket
+		}
+	}
+	return bodyTicket
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func decodeTicket(ticketB64 string) ([]byte, error) {
@@ -563,6 +704,117 @@ func decodeTicket(ticketB64 string) ([]byte, error) {
 		return nil, fmt.Errorf("bad base64: %w", err)
 	}
 	return b, nil
+}
+
+func (s *Server) requireBearerAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.offeringsAuthToken == "" {
+		return true
+	}
+	got := r.Header.Get("Authorization")
+	want := "Bearer " + s.offeringsAuthToken
+	if len(got) != len(want) || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
+		return false
+	}
+	return true
+}
+
+func ensureSingleJSONDocument(dec *json.Decoder) error {
+	var tail struct{}
+	if err := dec.Decode(&tail); err == nil {
+		return fmt.Errorf("request body must contain exactly one JSON object")
+	} else if err == io.EOF {
+		return nil
+	} else {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+}
+
+func parseTicketParamsRequest(in ticketParamsRequest) (paymentclient.GetTicketParamsRequest, error) {
+	sender, err := parseHexAddress("sender_eth_address", in.SenderETHAddress)
+	if err != nil {
+		return paymentclient.GetTicketParamsRequest{}, err
+	}
+	recipient, err := parseHexAddress("recipient_eth_address", in.RecipientETHAddress)
+	if err != nil {
+		return paymentclient.GetTicketParamsRequest{}, err
+	}
+	faceValue, ok := new(big.Int).SetString(strings.TrimSpace(in.FaceValueWei), 10)
+	if !ok {
+		return paymentclient.GetTicketParamsRequest{}, fmt.Errorf("face_value_wei must be a decimal integer")
+	}
+	if faceValue.Sign() <= 0 {
+		return paymentclient.GetTicketParamsRequest{}, fmt.Errorf("face_value_wei must be > 0")
+	}
+	if strings.TrimSpace(in.Capability) == "" {
+		return paymentclient.GetTicketParamsRequest{}, fmt.Errorf("capability is required")
+	}
+	if strings.TrimSpace(in.Offering) == "" {
+		return paymentclient.GetTicketParamsRequest{}, fmt.Errorf("offering is required")
+	}
+	return paymentclient.GetTicketParamsRequest{
+		Sender:     sender,
+		Recipient:  recipient,
+		FaceValue:  faceValue,
+		Capability: strings.TrimSpace(in.Capability),
+		Offering:   strings.TrimSpace(in.Offering),
+	}, nil
+}
+
+func parseHexAddress(field, value string) ([]byte, error) {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "0x") && !strings.HasPrefix(trimmed, "0X") {
+		return nil, fmt.Errorf("%s must be a 0x-prefixed hex address", field)
+	}
+	raw := trimmed[2:]
+	if len(raw) != 40 {
+		return nil, fmt.Errorf("%s must be exactly 20 bytes (40 hex chars)", field)
+	}
+	out, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be a valid hex address", field)
+	}
+	return out, nil
+}
+
+func (s *Server) writeTicketParamsProxyError(w http.ResponseWriter, err error) {
+	switch status.Code(err) {
+	case codes.InvalidArgument:
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	case codes.Unavailable, codes.DeadlineExceeded:
+		writeError(w, http.StatusServiceUnavailable, "payment_daemon_unavailable", err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "ticket_params_unavailable", err.Error())
+	}
+}
+
+func renderTicketParamsJSON(tp paymentclient.TicketParams) ticketParamsJSON {
+	return ticketParamsJSON{
+		Recipient:         bytesToHexString(tp.Recipient),
+		FaceValue:         bytesToDecimalString(tp.FaceValueWei),
+		WinProb:           bytesToHexString(tp.WinProb),
+		RecipientRandHash: bytesToHexString(tp.RecipientRandHash),
+		Seed:              bytesToHexString(tp.Seed),
+		ExpirationBlock:   bytesToDecimalString(tp.ExpirationBlock),
+		ExpirationParams: ticketExpirationParamsJSON{
+			CreationRound:          tp.ExpirationParams.CreationRound,
+			CreationRoundBlockHash: bytesToHexString(tp.ExpirationParams.CreationRoundBlockHash),
+		},
+	}
+}
+
+func bytesToHexString(b []byte) string {
+	if len(b) == 0 {
+		return "0x"
+	}
+	return "0x" + hex.EncodeToString(b)
+}
+
+func bytesToDecimalString(b []byte) string {
+	if len(b) == 0 {
+		return "0"
+	}
+	return new(big.Int).SetBytes(b).String()
 }
 
 // writeJSON sends a JSON body with the given status.

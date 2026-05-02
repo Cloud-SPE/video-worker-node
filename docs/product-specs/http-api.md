@@ -13,7 +13,7 @@ shell is the only intended client.
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/v1/video/transcode` | `VODSubmitRequest` | one-shot encode |
+| POST | `/v1/video/transcode` | `VODSubmitRequest` | one-shot encode; paid via `livepeer-payment` header |
 | POST | `/v1/video/transcode/status` | `{ job_id }` | poll job |
 | GET  | `/v1/video/transcode/presets` | — | list configured presets |
 
@@ -21,17 +21,17 @@ shell is the only intended client.
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/v1/video/transcode/abr` | `ABRSubmitRequest` | per-rendition encode + master HLS |
+| POST | `/v1/video/transcode/abr` | `ABRSubmitRequest` | per-rendition encode + master HLS; paid via `livepeer-payment` header |
 | POST | `/v1/video/transcode/abr/status` | `{ job_id }` | poll job |
 
 ## Live (RTMP-based; new shape per plan 0002)
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/stream/start` | `StreamStartRequest` (work_id + preset + optional payment_ticket; no Channel fields) | operator pre-registration; broadcaster connects to returned `rtmp_url` |
-| POST | `/stream/stop` | `{ work_id }` | graceful close |
-| POST | `/stream/topup` | `{ work_id, payment_ticket }` | extend session balance |
-| POST | `/stream/status` | `{ work_id }` | snapshot stream state |
+| POST | `/stream/start` | `StreamStartRequest` (`stream_id` or `work_id`, preset; no Channel fields) | operator pre-registration; accepts `livepeer-payment` header and still tolerates body `payment_ticket` during transition |
+| POST | `/stream/stop` | `{ stream_id }` | graceful close; `work_id` also accepted for compatibility |
+| POST | `/stream/topup` | `{ stream_id }` + payment | extend session balance; accepts header and body ticket |
+| POST | `/stream/status` | `{ stream_id }` | snapshot stream state; `work_id` also accepted for compatibility |
 
 ## Health + diagnostics
 
@@ -39,20 +39,29 @@ shell is the only intended client.
 |---|---|---|
 | GET | `/health` | liveness + mode + active stream count |
 | GET | `/registry/offerings` | suite-wide capability advertisement for orch-coordinator scrape; omits internal `backend_url`, may include orch-internal `worker_eth_address` |
+| POST | `/v1/payment/ticket-params` | authenticated helper that proxies receiver-side `GetTicketParams` for exact `(sender, recipient, face_value, capability, offering)` lookups |
 
 ## Auth
 
 Optional bearer token via `Authorization: Bearer <token>` when
 top-level `auth_token` is configured in shared `worker.yaml`. In the
-v3.0.1 contract this gates `GET /registry/offerings`; payment ticket
-validation is separate.
+v3.0.1 contract this gates `GET /registry/offerings` and
+`POST /v1/payment/ticket-params`; payment ticket validation on paid
+work routes is separate.
 
-Paid endpoints additionally require a base64-encoded `payment_ticket`
-field in the request body, which the worker validates against
-`payment-daemon` via `ProcessPayment`. Live mode's `/stream/start` and
-`/stream/topup` paths debit the streaming-session balance via
-`OpenStreamingSession` / `TopUpStreamingSession`. Worker-side
-implementation lives in `internal/service/liverunner/`.
+Paid VOD / ABR endpoints require a base64-encoded `livepeer-payment`
+header carrying `livepeer.payments.v1.Payment` bytes. The worker
+validates that payload against `payment-daemon` via `ProcessPayment`.
+
+Live mode's `/stream/start` and `/stream/topup` paths accept the same
+header and still tolerate body `payment_ticket` as a compatibility
+alias while callers migrate. Worker-side implementation lives in
+`internal/service/liverunner/`.
+
+`POST /v1/payment/ticket-params` is unpaid. It does not size work or
+create a payment. The caller supplies the exact `face_value_wei`, and
+the worker relays the request to the co-located receiver daemon's
+`GetTicketParams` RPC.
 
 ## Error envelope
 
