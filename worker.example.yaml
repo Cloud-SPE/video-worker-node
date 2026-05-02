@@ -30,7 +30,9 @@ payment_daemon:
     # Dev example:
     # mode: fake
     # fake_sender_balances_wei:
-    #   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "1000000000000000000"
+    #   # Matches the gateway repo's default local dev sender identity when
+    #   # PAYMENT_DAEMON_DEV_SIGNING_KEY_HEX is left at its checked-in value.
+    #   "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": "1000000000000000000"
 
 worker:
   http_listen: ":8081"

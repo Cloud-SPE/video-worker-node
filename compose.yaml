@@ -26,7 +26,7 @@ name: livepeer-video-worker
 
 services:
   payment-daemon:
-    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v3.0.2}
+    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v3.1.7}
     command:
       - "--mode=receiver"
       - "--socket=/var/run/livepeer/payment.sock"
@@ -46,6 +46,7 @@ services:
     command:
       - "--mode=${WORKER_MODE:-vod}"
       - "--config=/etc/livepeer/worker.yaml"
+      - "--presets-file=${PRESETS_FILE:-/etc/livepeer/presets/h264-vod.yaml}"
       - "--log-level=info"
       # METRICS_PORT activates the Prometheus /metrics listener inside
       # the container. Set to e.g. 9091 to enable; when unset the flag

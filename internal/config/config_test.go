@@ -80,6 +80,53 @@ func TestValidateRequiredFields(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsEmptyHTTPInProdWhenDevFalseFails(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	c.Dev = false
+	c.HTTPListen = ""
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "http_listen") {
+		t.Fatalf("err=%v want http_listen validation error", err)
+	}
+}
+
+func TestRegistryCapabilityClone(t *testing.T) {
+	t.Parallel()
+	in := RegistryCapability{
+		Name:     "video:transcode.vod",
+		WorkUnit: "video_frame_megapixel",
+		Extra: map[string]any{
+			"accel": "nvenc",
+		},
+		Offerings: []RegistryOffering{
+			{
+				ID:                  "h264-1080p",
+				PricePerWorkUnitWei: "1250000",
+				BackendURL:          "http://127.0.0.1:9000",
+				Constraints: map[string]any{
+					"codec": "h264",
+				},
+			},
+		},
+	}
+
+	out := in.Clone()
+	out.Extra["accel"] = "software"
+	out.Offerings[0].Constraints["codec"] = "hevc"
+	out.Offerings[0].BackendURL = "http://127.0.0.1:9999"
+
+	if got := in.Extra["accel"]; got != "nvenc" {
+		t.Fatalf("source Extra mutated: got %v", got)
+	}
+	if got := in.Offerings[0].Constraints["codec"]; got != "h264" {
+		t.Fatalf("source Constraints mutated: got %v", got)
+	}
+	if got := in.Offerings[0].BackendURL; got != "http://127.0.0.1:9000" {
+		t.Fatalf("source offering mutated: got %q", got)
+	}
+}
+
 func TestDevConflict(t *testing.T) {
 	t.Parallel()
 	c := Default()
@@ -236,6 +283,147 @@ capabilities:
 	_, err := LoadSharedWorker(path)
 	if err == nil || !strings.Contains(err.Error(), "protocol_version=2") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLoadSharedWorkerValidationBranches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name: "missing payment daemon",
+			body: `
+protocol_version: 1
+worker:
+  http_listen: ":8081"
+  payment_daemon_socket: "/var/run/payment.sock"
+capabilities:
+  - capability: "video:transcode.vod"
+    work_unit: video_frame_megapixel
+    offerings:
+      - id: "h264-1080p"
+        price_per_work_unit_wei: "1250000"
+        backend_url: "http://127.0.0.1:9000"
+`,
+			wantErr: "missing 'payment_daemon' section",
+		},
+		{
+			name: "mixed case worker eth address",
+			body: `
+protocol_version: 1
+worker_eth_address: "0x1234567890abcDEF1234567890abcdef12345678"
+payment_daemon:
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
+worker:
+  http_listen: ":8081"
+  payment_daemon_socket: "/var/run/payment.sock"
+capabilities:
+  - capability: "video:transcode.vod"
+    work_unit: video_frame_megapixel
+    offerings:
+      - id: "h264-1080p"
+        price_per_work_unit_wei: "1250000"
+        backend_url: "http://127.0.0.1:9000"
+`,
+			wantErr: "worker_eth_address",
+		},
+		{
+			name: "invalid work unit lists sorted values",
+			body: `
+protocol_version: 1
+payment_daemon:
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
+worker:
+  http_listen: ":8081"
+  payment_daemon_socket: "/var/run/payment.sock"
+capabilities:
+  - capability: "video:transcode.vod"
+    work_unit: bananas
+    offerings:
+      - id: "h264-1080p"
+        price_per_work_unit_wei: "1250000"
+        backend_url: "http://127.0.0.1:9000"
+`,
+			wantErr: "work_unit: must be one of",
+		},
+		{
+			name: "offering requires absolute backend url",
+			body: `
+protocol_version: 1
+payment_daemon:
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
+worker:
+  http_listen: ":8081"
+  payment_daemon_socket: "/var/run/payment.sock"
+capabilities:
+  - capability: "video:transcode.vod"
+    work_unit: video_frame_megapixel
+    offerings:
+      - id: "h264-1080p"
+        price_per_work_unit_wei: "1250000"
+        backend_url: "/relative"
+`,
+			wantErr: "backend_url: must be an absolute URL",
+		},
+		{
+			name: "scalar extra rejected",
+			body: `
+protocol_version: 1
+payment_daemon:
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
+worker:
+  http_listen: ":8081"
+  payment_daemon_socket: "/var/run/payment.sock"
+capabilities:
+  - capability: "video:transcode.vod"
+    work_unit: video_frame_megapixel
+    extra: nope
+    offerings:
+      - id: "h264-1080p"
+        price_per_work_unit_wei: "1250000"
+        backend_url: "http://127.0.0.1:9000"
+`,
+			wantErr: "must be an object when present",
+		},
+		{
+			name: "scalar constraints rejected",
+			body: `
+protocol_version: 1
+payment_daemon:
+  recipient_eth_address: "0x1234567890abcdef1234567890abcdef12345678"
+worker:
+  http_listen: ":8081"
+  payment_daemon_socket: "/var/run/payment.sock"
+capabilities:
+  - capability: "video:transcode.vod"
+    work_unit: video_frame_megapixel
+    offerings:
+      - id: "h264-1080p"
+        price_per_work_unit_wei: "1250000"
+        backend_url: "http://127.0.0.1:9000"
+        constraints: nope
+`,
+			wantErr: "must be an object when present",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "worker.yaml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatalf("write worker.yaml: %v", err)
+			}
+			_, err := LoadSharedWorker(path)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err=%v want substring %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

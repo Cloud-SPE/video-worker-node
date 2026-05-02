@@ -20,7 +20,7 @@ name: livepeer-video-worker
 
 services:
   payment-daemon:
-    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v3.0.2}
+    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v3.1.7}
     restart: unless-stopped
     command:
       - --mode=receiver
@@ -59,6 +59,7 @@ services:
     command:
       - --mode=${WORKER_MODE:-vod}
       - --config=/etc/livepeer/worker.yaml
+      - --presets-file=${PRESETS_FILE:-/etc/livepeer/presets/h264-vod.yaml}
       - --log-level=${WORKER_LOG_LEVEL:-info}
       # METRICS_PORT (default empty) enables the Prometheus /metrics
       # listener inside the container. See .env.example.
