@@ -31,6 +31,15 @@ message CreatePaymentRequest {
   // bytes. The daemon resolves a worker URL for this address via the local
   // service-registry-daemon resolver.
   bytes recipient = 2;
+
+  // Capability being purchased, e.g. "openai:/v1/chat/completions". Sender
+  // mode forwards this to the payee-side ticket-params endpoint so the worker
+  // can validate the request against its offered routes.
+  string capability = 3;
+
+  // Offering within the capability being purchased, e.g. a model identifier.
+  // Sender mode forwards this to the payee-side ticket-params endpoint.
+  string offering = 4;
 }
 
 message CreatePaymentResponse {

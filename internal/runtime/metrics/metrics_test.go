@@ -2,7 +2,9 @@ package metrics
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,6 +68,23 @@ func TestListenInvalidAddr(t *testing.T) {
 func TestHealthAndMetrics(t *testing.T) {
 	t.Parallel()
 	s, _ := New("127.0.0.1:0", 0)
+	s.SetSnapshotFunc(func() Snapshot {
+		return Snapshot{
+			GPUVendor:      "nvidia",
+			GPUMaxSessions: 8,
+			ActiveJobs:     3,
+			ActiveStreams:  2,
+			Scheduler: SchedulerSnapshot{
+				TotalSlots:        6,
+				LiveReservedSlots: 1,
+				TotalCost:         600,
+				LiveReservedCost:  100,
+				ActiveSlots:       4,
+				ActiveCost:        360,
+				QueuedBatch:       2,
+			},
+		}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -86,7 +105,24 @@ func TestHealthAndMetrics(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("metrics: status=%d", resp.StatusCode)
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read metrics body: %v", err)
+	}
 	_ = resp.Body.Close()
+	text := string(body)
+	for _, needle := range []string{
+		`livepeer_videoworker_gpu_sessions_inflight{gpu_vendor="nvidia"} 4`,
+		`livepeer_videoworker_gpu_cost_capacity{gpu_vendor="nvidia"} 600`,
+		`livepeer_videoworker_gpu_cost_inflight{gpu_vendor="nvidia"} 360`,
+		`livepeer_videoworker_gpu_batch_queue_depth{gpu_vendor="nvidia"} 2`,
+		`livepeer_videoworker_jobs_active{gpu_vendor="nvidia"} 3`,
+		`livepeer_videoworker_streams_active{gpu_vendor="nvidia"} 2`,
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("missing metric line %q in:\n%s", needle, text)
+		}
+	}
 	if got := s.Recorder(); got == nil {
 		t.Fatal("recorder")
 	}

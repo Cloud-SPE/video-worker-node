@@ -20,7 +20,7 @@ name: livepeer-video-worker
 
 services:
   payment-daemon:
-    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v3.0.2}
+    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v4.0.0}
     restart: unless-stopped
     command:
       - --mode=receiver
@@ -57,9 +57,9 @@ services:
     depends_on:
       - payment-daemon
     command:
-      - --mode=${WORKER_MODE:-vod}
+      - --mode=${WORKER_MODE:-all}
       - --config=/etc/livepeer/worker.yaml
-      - --presets-file=${PRESETS_FILE:-/etc/livepeer/presets/h264-vod.yaml}
+      - --presets-file=${PRESETS_FILE:-/etc/livepeer/presets/h264-streaming.yaml}
       - --log-level=${WORKER_LOG_LEVEL:-info}
       # METRICS_PORT (default empty) enables the Prometheus /metrics
       # listener inside the container. See .env.example.
@@ -74,7 +74,7 @@ services:
       # docker) can reach it. Drop this block if cloudflared shares
       # the cf-tunnel network and reaches the container by name.
       - '${WORKER_HOST_PORT:-8081}:8081'
-      # RTMP ingest — only meaningful when WORKER_MODE=live.
+      # RTMP ingest.
       - '${RTMP_HOST_PORT:-1935}:1935'
       # Metrics port — published only when METRICS_PORT is set.
       # Bind to 127.0.0.1 if you only want a local Prometheus scraper

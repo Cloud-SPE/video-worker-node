@@ -1,7 +1,7 @@
 ---
 title: Streaming-session payment pattern
 status: accepted
-last-reviewed: 2026-04-26
+last-reviewed: 2026-05-03
 ---
 
 # Streaming-session payment pattern
@@ -34,7 +34,7 @@ balance authorizes it.
 
 ## The five-step recipe
 
-1. **Open**: gateway resolves a worker, mints direct payment credit, and calls the worker's canonical `POST /api/sessions/start`. The worker runs `ProcessPayment(...)`, derives a durable `work_id`, and returns `worker_session_id`.
+1. **Open**: gateway resolves a worker, mints direct payment credit, and calls the worker's canonical `POST /api/sessions/start`. The worker chooses `work_id`, opens a pending payee session with `OpenSession(...)`, then runs the first `ProcessPayment(...)` to seal sender and returns `worker_session_id`.
 2. **Tick**: every 5s (`debit_cadence`), the worker calls receiver-side `DebitBalance(sender, work_id, units, seq)` with the encoded-seconds delta since the last tick. `seq` is monotonically increasing per session — replays of the same `seq` are receiver-side no-ops.
 3. **Watermark**: after each debit, the worker runs `SufficientBalance(sender, work_id, runway_seconds)` locally. If runway is low, the worker emits `session.balance.low` to the gateway and starts grace locally.
 4. **Top-up**: gateway checks whether the customer's USD balance can continue funding the stream. If yes, it mints fresh payment credit and calls the worker's canonical `POST /api/sessions/{gateway_session_id}/topup`; the worker applies it to the existing `work_id` via `ProcessPayment(...)`. If not, customer-facing low-balance semantics are exposed from the gateway side while the worker counts down grace.
@@ -46,7 +46,7 @@ balance authorizes it.
 |---|---|---|
 | Per-session state machine | worker | `apps/transcode-worker-node/internal/service/liverunner` |
 | `seq` counter persistence | worker | BoltDB via `repo/jobs.IncrementDebitSeq`; survives worker restart |
-| `ProcessPayment` / `DebitBalance` / `SufficientBalance` / `CloseSession` | worker | calls into co-located `payment-daemon` (receiver) |
+| `OpenSession` / `ProcessPayment` / `DebitBalance` / `SufficientBalance` / `CloseSession` | worker | calls into co-located `payment-daemon` (receiver) |
 | Project balance lookup + topup authorization | gateway | decides whether to mint additional payment credit |
 | Per-second cost basis (`liveCentsPerSecond`) | gateway | pricing/offering logic |
 | Customer billing ledger lifecycle | gateway | derived from accepted worker `session.usage.tick` events |

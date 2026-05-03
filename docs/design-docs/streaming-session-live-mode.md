@@ -1,7 +1,7 @@
 ---
 title: Streaming-session payment in live mode
 status: drafted
-last-reviewed: 2026-05-02
+last-reviewed: 2026-05-03
 ---
 
 # Streaming-session payment in live mode
@@ -15,7 +15,8 @@ last-reviewed: 2026-05-02
 > now moving to Pattern B:
 >
 > - gateway opens via `POST /api/sessions/start`
-> - worker applies `ProcessPayment(...)` and derives `work_id`
+> - worker chooses `work_id`, opens `OpenSession(...)`, then applies the
+>   first `ProcessPayment(...)`
 > - worker debits locally with `DebitBalance(...)`
 > - worker checks runway locally with `SufficientBalance(...)`
 > - gateway funds further runtime through canonical topups
@@ -26,7 +27,7 @@ last-reviewed: 2026-05-02
 
 | Step | Worker call | payment-daemon API |
 |---|---|---|
-| Session open | once, before RTMP accept | gateway `POST /api/sessions/start`; worker `ProcessPayment(...)` |
+| Session open | once, before RTMP accept | gateway `POST /api/sessions/start`; worker `OpenSession(...)` then `ProcessPayment(...)` |
 | Tick | every `DebitCadence` (default 5s) | worker `DebitBalance({ sender, work_id, seq, units })` |
 | Runway check | after each debit | worker `SufficientBalance({ sender, work_id, min_units })` |
 | Top-up request | when gateway decides funding should continue | gateway `POST /api/sessions/{gateway_session_id}/topup`; worker `ProcessPayment(...)` |

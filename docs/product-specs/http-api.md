@@ -13,7 +13,7 @@ shell is the only intended client.
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/v1/video/transcode` | `VODSubmitRequest` | one-shot encode; paid via `livepeer-payment` header |
+| POST | `/v1/video/transcode` | `VODSubmitRequest` (`preset`, optional `offering`) | one-shot encode; paid via `livepeer-payment` header |
 | POST | `/v1/video/transcode/status` | `{ job_id }` | poll job |
 | GET  | `/v1/video/transcode/presets` | — | list configured presets |
 
@@ -21,17 +21,17 @@ shell is the only intended client.
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/v1/video/transcode/abr` | `ABRSubmitRequest` | per-rendition encode + master HLS; paid via `livepeer-payment` header |
+| POST | `/v1/video/transcode/abr` | `ABRSubmitRequest` (`presets`, optional `offering`) | per-rendition encode + master HLS; paid via `livepeer-payment` header |
 | POST | `/v1/video/transcode/abr/status` | `{ job_id }` | poll job |
 
 ## Live (RTMP-based; Pattern B session surface)
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/api/sessions/start` | `SessionStartRequest` (`gateway_session_id`, optional `preset`) | canonical worker session-open route; requires `livepeer-payment` header; credits receiver-side balance and returns `worker_session_id` + `work_id` |
+| POST | `/api/sessions/start` | `SessionStartRequest` (`gateway_session_id`, optional `preset`, optional `offering`) | canonical worker session-open route; requires `livepeer-payment` header; opens a pending payee session, credits receiver-side balance, and returns `worker_session_id` + `work_id` |
 | POST | `/api/sessions/{gateway_session_id}/topup` | payment only | canonical worker session-topup route; requires `livepeer-payment` header; applies credit to the existing live `work_id` |
 | POST | `/api/sessions/{gateway_session_id}/end` | — | canonical graceful end route; closes the receiver-side payment session and stops the worker-owned live session |
-| POST | `/stream/start` | `StreamStartRequest` (`stream_id` or `work_id`, preset; no Channel fields) | legacy worker live route retained during the rewrite; not the long-term contract |
+| POST | `/stream/start` | `StreamStartRequest` (`stream_id` or `work_id`, `preset`, optional `offering`; no Channel fields) | legacy worker live route retained during the rewrite; now opens/credits the payee session before registering the stream |
 | POST | `/stream/stop` | `{ stream_id }` | legacy worker live route retained during the rewrite |
 | POST | `/stream/topup` | `{ stream_id }` + payment | legacy worker live route retained during the rewrite |
 | POST | `/stream/status` | `{ stream_id }` | legacy worker live route retained during the rewrite; returns the persisted `types.Stream` record, including Pattern B correlation/runtime fields such as `gateway_session_id`, `worker_session_id`, `payment_work_id`, `low_balance`, and `grace_until` when present |
@@ -40,7 +40,7 @@ shell is the only intended client.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/health` | liveness + mode + active stream count |
+| GET | `/health` | liveness + mode + active stream count + GPU scheduler snapshot |
 | GET | `/registry/offerings` | suite-wide capability advertisement for orch-coordinator scrape; omits internal `backend_url`, may include orch-internal `worker_eth_address` |
 | POST | `/v1/payment/ticket-params` | authenticated helper that proxies receiver-side `GetTicketParams` for exact `(sender, recipient, face_value, capability, offering)` lookups |
 
@@ -53,8 +53,10 @@ v3.0.1 contract this gates `GET /registry/offerings` and
 work routes is separate.
 
 Paid VOD / ABR endpoints require a base64-encoded `livepeer-payment`
-header carrying `livepeer.payments.v1.Payment` bytes. The worker
-validates that payload against `payment-daemon` via `ProcessPayment`.
+header carrying `livepeer.payments.v1.Payment` bytes. The worker first
+opens an authoritative payee session using its configured capability /
+offering catalog, then validates the payment against `payment-daemon`
+via `ProcessPayment`.
 
 Canonical live session routes use the `livepeer-payment` header and do
 not require a JSON `payment_ticket` alias. During the worker rewrite,
@@ -77,7 +79,7 @@ the worker relays the request to the co-located receiver daemon's
 }
 ```
 
-Common codes: `bad_json`, `missing_fields`, `wrong_mode`, `no_runner`,
+Common codes: `bad_json`, `missing_fields`, `no_runner`,
 `unauthorized`, `payment`, `bad_ticket`, plus `types.ErrCode*` (e.g.,
 `JOB_INVALID_PRESET`, `STREAM_NOT_FOUND`, `INVALID_PAYMENT`,
 `INSUFFICIENT_BALANCE`, `TOPUP_RATE_LIMITED`).

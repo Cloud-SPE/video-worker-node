@@ -9,11 +9,13 @@ import (
 	"time"
 )
 
-// Mode controls which job runner is wired up. Mode-specific RPCs return
-// Unimplemented when called on the wrong mode.
+// Mode controls runtime shape. The canonical deployment is unified mode,
+// where all runners are wired in one process.
 type Mode string
 
 const (
+	// ModeUnified: one process serves VOD, ABR, and live together.
+	ModeUnified Mode = "all"
 	// ModeVOD: single-shot transcode of a finite input to a single output.
 	ModeVOD Mode = "vod"
 	// ModeABR: ladder of renditions from a single input + master HLS manifest.
@@ -25,24 +27,27 @@ const (
 // String renders the mode for logs / metrics labels.
 func (m Mode) String() string { return string(m) }
 
-// Validate returns nil iff m is one of the three known modes.
+// Validate returns nil iff m is one of the known modes.
 func (m Mode) Validate() error {
 	switch m {
-	case ModeVOD, ModeABR, ModeLive:
+	case ModeUnified, ModeVOD, ModeABR, ModeLive:
 		return nil
 	default:
-		return fmt.Errorf("unknown mode %q (want vod|abr|live)", m)
+		return fmt.Errorf("unknown mode %q (want all|vod|abr|live)", m)
 	}
 }
 
+// IsUnified reports whether this is unified mode.
+func (m Mode) IsUnified() bool { return m == ModeUnified }
+
 // IsVOD reports whether this is VOD mode.
-func (m Mode) IsVOD() bool { return m == ModeVOD }
+func (m Mode) IsVOD() bool { return m == ModeVOD || m == ModeUnified }
 
 // IsABR reports whether this is ABR mode.
-func (m Mode) IsABR() bool { return m == ModeABR }
+func (m Mode) IsABR() bool { return m == ModeABR || m == ModeUnified }
 
 // IsLive reports whether this is Live mode.
-func (m Mode) IsLive() bool { return m == ModeLive }
+func (m Mode) IsLive() bool { return m == ModeLive || m == ModeUnified }
 
 // JobPhase is the durable lifecycle state of a job.
 type JobPhase string
@@ -253,6 +258,7 @@ const (
 	ErrCodeUploadFailed           = "UPLOAD_FAILED"
 	ErrCodePaymentFailed          = "PAYMENT_FAILED"
 	ErrCodeWebhookFailed          = "WEBHOOK_FAILED"
+	ErrCodeCapacityExceeded       = "CAPACITY_EXCEEDED"
 	ErrCodeStreamEncoderFailed    = "STREAM_ENCODER_FAILED"
 	ErrCodeBalanceExhausted       = "BALANCE_EXHAUSTED"
 	ErrCodePaymentUnreachable     = "PAYMENT_UNREACHABLE"
@@ -310,10 +316,21 @@ type Stream struct {
 
 // CapacityReport summarizes the worker's current load.
 type CapacityReport struct {
-	Mode          Mode       `json:"mode"`
-	GPU           GPUProfile `json:"gpu"`
-	MaxQueueSize  int        `json:"max_queue_size"`
-	ActiveJobs    int        `json:"active_jobs"`
-	QueuedJobs    int        `json:"queued_jobs"`
-	ActiveStreams int        `json:"active_streams"`
+	Mode                Mode       `json:"mode"`
+	GPU                 GPUProfile `json:"gpu"`
+	MaxQueueSize        int        `json:"max_queue_size"`
+	ActiveJobs          int        `json:"active_jobs"`
+	QueuedJobs          int        `json:"queued_jobs"`
+	ActiveStreams       int        `json:"active_streams"`
+	GPUSlotsTotal       int        `json:"gpu_slots_total"`
+	GPULiveReserved     int        `json:"gpu_live_reserved_slots"`
+	GPUCostTotal        int        `json:"gpu_cost_total"`
+	GPULiveReservedCost int        `json:"gpu_live_reserved_cost"`
+	GPUActiveSlots      int        `json:"gpu_active_slots"`
+	GPUActiveBatch      int        `json:"gpu_active_batch_slots"`
+	GPUActiveLive       int        `json:"gpu_active_live_slots"`
+	GPUActiveCost       int        `json:"gpu_active_cost"`
+	GPUActiveBatchCost  int        `json:"gpu_active_batch_cost"`
+	GPUActiveLiveCost   int        `json:"gpu_active_live_cost"`
+	GPUQueuedBatchJobs  int        `json:"gpu_queued_batch_jobs"`
 }

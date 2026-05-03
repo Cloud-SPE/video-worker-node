@@ -47,7 +47,7 @@ func Run(ctx context.Context, cfg Config) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 
-	if cfg.Mode.IsVOD() && cfg.JobRunner != nil {
+	if cfg.JobRunner != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -56,7 +56,7 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 		}()
 	}
-	if cfg.Mode.IsABR() && cfg.ABRRunner != nil {
+	if cfg.ABRRunner != nil {
 		if cfg.ABRPlanFn == nil {
 			return errors.New("lifecycle: ABRPlanFn required when ABRRunner wired")
 		}

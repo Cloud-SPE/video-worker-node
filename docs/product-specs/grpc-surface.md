@@ -16,7 +16,7 @@ Filesystem permissions on the socket are the access-control mechanism.
 | `Health()` | mode, dev flag, GPU profile, active job + stream counts |
 | `ListJobs(filter)` | filter by status / mode / time range |
 | `GetJob(job_id)` | full job record |
-| `GetCapacity()` | concurrent encode slots, in-use, queued, active live streams |
+| `GetCapacity()` | concurrent encode slots, reserved live headroom, in-use batch/live slots, queued batch jobs, active live streams |
 | `ForceCancelJob(job_id)` | operator-initiated cancellation |
 | `ListPresets()` | enumerate the loaded preset catalog |
 | `ReloadPresets()` | pick up presets file changes without restart |

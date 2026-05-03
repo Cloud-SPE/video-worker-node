@@ -21,6 +21,7 @@ import (
 	"github.com/Cloud-SPE/video-worker-node/internal/config"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/ingest"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/scheduler"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/shellclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/store"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
@@ -77,9 +78,12 @@ func newTestServer(t *testing.T, mode types.Mode) *Server {
 	if err != nil {
 		t.Fatalf("presets: %v", err)
 	}
-	lr, err := liverunner.New(liverunner.Config{Repo: repo, Presets: pl})
-	if err != nil {
-		t.Fatalf("liverunner: %v", err)
+	var lr *liverunner.Runner
+	if mode.IsLive() {
+		lr, err = liverunner.New(liverunner.Config{Repo: repo, Presets: pl})
+		if err != nil {
+			t.Fatalf("liverunner: %v", err)
+		}
 	}
 	srv, err := New(Config{
 		Mode: mode, Dev: true, Repo: repo, Presets: pl, LiveRunner: lr,
@@ -88,6 +92,7 @@ func newTestServer(t *testing.T, mode types.Mode) *Server {
 		WorkerEthAddress: "0x1234567890abcdef1234567890abcdef12345678",
 		PublicRTMPURL:    "rtmp://localhost:1935/live",
 		MaxConcurrent:    4,
+		Scheduler:        scheduler.New(scheduler.Config{TotalSlots: 4, LiveReservedSlots: 1}),
 		RegistryCapabilities: []config.RegistryCapability{
 			{
 				Name:     "video:transcode.vod",
@@ -138,6 +143,19 @@ func newPaidLiveTestServer(t *testing.T) (*Server, *paymentbroker.Fake) {
 		LiveRunner:    lr,
 		Payment:       payment,
 		PublicRTMPURL: "rtmp://localhost:1935/live",
+		RegistryCapabilities: []config.RegistryCapability{
+			{
+				Name:     "video:live.rtmp",
+				WorkUnit: "video_frame_megapixel",
+				Offerings: []config.RegistryOffering{
+					{
+						ID:                  "live-h264",
+						PricePerWorkUnitWei: "2500000",
+						BackendURL:          "http://127.0.0.1:9001",
+					},
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("server: %v", err)
@@ -165,6 +183,16 @@ func TestHandleHealth(t *testing.T) {
 	}
 	if body["protocol_version"] != float64(11) {
 		t.Fatalf("protocol_version: %v", body["protocol_version"])
+	}
+	schedulerState, ok := body["gpu_scheduler"].(map[string]any)
+	if !ok {
+		t.Fatalf("gpu_scheduler: %T", body["gpu_scheduler"])
+	}
+	if schedulerState["total_slots"] != float64(4) {
+		t.Fatalf("total_slots: %v", schedulerState["total_slots"])
+	}
+	if schedulerState["total_cost"] != float64(400) {
+		t.Fatalf("total_cost: %v", schedulerState["total_cost"])
 	}
 }
 
@@ -257,13 +285,16 @@ func TestHandleStreamStartMissingFields(t *testing.T) {
 	}
 }
 
-func TestHandleStreamStartWrongMode(t *testing.T) {
+func TestHandleStreamStartReturnsNoRunnerWhenLiveUnwired(t *testing.T) {
 	srv := newTestServer(t, types.ModeVOD)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/stream/start", strings.NewReader(`{"work_id":"w","preset":"x"}`))
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status=%d", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no_runner") {
+		t.Fatalf("body=%s", rec.Body.String())
 	}
 }
 
@@ -295,6 +326,11 @@ func TestHandleSessionStartAcceptsPaymentAndReturnsCorrelationFields(t *testing.
 	}
 	if payment.Balance(resp.WorkID) == 0 {
 		t.Fatalf("expected credited balance for work_id %q", resp.WorkID)
+	}
+	if binding, ok := payment.OpenedBinding(resp.WorkID); !ok {
+		t.Fatalf("expected OpenSession for work_id %q", resp.WorkID)
+	} else if binding.Capability != "video:live.rtmp" || binding.Offering != "live-h264" {
+		t.Fatalf("unexpected binding: %+v", binding)
 	}
 	if resp.Stream.GatewaySessionID != "gw_123" {
 		t.Fatalf("stream.gateway_session_id=%q", resp.Stream.GatewaySessionID)
@@ -508,6 +544,19 @@ func TestHandleSessionEndAcceptedPatternBClosesPaymentOnce(t *testing.T) {
 		LiveRunner:    lr,
 		Payment:       payment,
 		PublicRTMPURL: "rtmp://localhost:1935/live",
+		RegistryCapabilities: []config.RegistryCapability{
+			{
+				Name:     "video:live.rtmp",
+				WorkUnit: "video_frame_megapixel",
+				Offerings: []config.RegistryOffering{
+					{
+						ID:                  "live-h264",
+						PricePerWorkUnitWei: "2500000",
+						BackendURL:          "http://127.0.0.1:9001",
+					},
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("server: %v", err)
@@ -572,6 +621,19 @@ func TestHandleVODSubmitAcceptsPaymentHeader(t *testing.T) {
 		Repo:    repo,
 		Presets: pl,
 		Payment: paymentbroker.NewFake(),
+		RegistryCapabilities: []config.RegistryCapability{
+			{
+				Name:     "video:transcode.vod",
+				WorkUnit: "video_frame_megapixel",
+				Offerings: []config.RegistryOffering{
+					{
+						ID:                  "720p",
+						PricePerWorkUnitWei: "1250000",
+						BackendURL:          "http://127.0.0.1:9000",
+					},
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("server: %v", err)
@@ -606,6 +668,19 @@ func TestHandleVODSubmitRequiresPaymentWhenBrokerWired(t *testing.T) {
 		Repo:    repo,
 		Presets: pl,
 		Payment: paymentbroker.NewFake(),
+		RegistryCapabilities: []config.RegistryCapability{
+			{
+				Name:     "video:transcode.vod",
+				WorkUnit: "video_frame_megapixel",
+				Offerings: []config.RegistryOffering{
+					{
+						ID:                  "720p",
+						PricePerWorkUnitWei: "1250000",
+						BackendURL:          "http://127.0.0.1:9000",
+					},
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("server: %v", err)

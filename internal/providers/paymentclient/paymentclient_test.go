@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/Cloud-SPE/video-worker-node/internal/service/paymentbroker"
 	pmt "github.com/Cloud-SPE/video-worker-node/proto/clients/livepeer/payments/v1"
 )
 
@@ -19,7 +20,10 @@ type fakeServer struct {
 	pmt.UnimplementedPayeeDaemonServer
 	processCalls int
 	debitCalls   int
+	openCalls    int
 	nilTicket    bool
+	lastOpen     *pmt.OpenSessionRequest
+	lastDebit    *pmt.DebitBalanceRequest
 }
 
 func (s *fakeServer) ListCapabilities(_ context.Context, _ *pmt.ListCapabilitiesRequest) (*pmt.ListCapabilitiesResponse, error) {
@@ -50,6 +54,12 @@ func (s *fakeServer) ProcessPayment(_ context.Context, req *pmt.ProcessPaymentRe
 	}, nil
 }
 
+func (s *fakeServer) OpenSession(_ context.Context, req *pmt.OpenSessionRequest) (*pmt.OpenSessionResponse, error) {
+	s.openCalls++
+	s.lastOpen = req
+	return &pmt.OpenSessionResponse{Outcome: pmt.OpenSessionResponse_OUTCOME_OPENED}, nil
+}
+
 func (s *fakeServer) GetTicketParams(_ context.Context, req *pmt.GetTicketParamsRequest) (*pmt.GetTicketParamsResponse, error) {
 	if s.nilTicket {
 		return &pmt.GetTicketParamsResponse{}, nil
@@ -70,8 +80,9 @@ func (s *fakeServer) GetTicketParams(_ context.Context, req *pmt.GetTicketParams
 	}, nil
 }
 
-func (s *fakeServer) DebitBalance(_ context.Context, _ *pmt.DebitBalanceRequest) (*pmt.DebitBalanceResponse, error) {
+func (s *fakeServer) DebitBalance(_ context.Context, req *pmt.DebitBalanceRequest) (*pmt.DebitBalanceResponse, error) {
 	s.debitCalls++
+	s.lastDebit = req
 	return &pmt.DebitBalanceResponse{Balance: []byte{42}}, nil
 }
 
@@ -107,6 +118,15 @@ func TestClientHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	if err := c.OpenSession(context.Background(), paymentbroker.SessionBinding{
+		WorkID:              "w",
+		Capability:          "video:transcode.vod",
+		Offering:            "h264-1080p",
+		PricePerWorkUnitWei: "1250000",
+		WorkUnit:            "video_frame_megapixel",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	r, err := c.ProcessPayment(context.Background(), []byte("ticket"), "w")
 	if err != nil {
 		t.Fatal(err)
@@ -117,12 +137,21 @@ func TestClientHappyPath(t *testing.T) {
 	if fs.processCalls != 1 {
 		t.Errorf("calls=%d", fs.processCalls)
 	}
+	if fs.openCalls != 1 {
+		t.Fatalf("open_calls=%d", fs.openCalls)
+	}
+	if got := fs.lastOpen.GetOffering(); got != "h264-1080p" {
+		t.Fatalf("open offering=%q", got)
+	}
 	bal, err := c.DebitBalance(context.Background(), []byte("s"), "w", 5, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bal) == 0 {
 		t.Error("empty balance")
+	}
+	if got := fs.lastDebit.GetDebitSeq(); got != 1 {
+		t.Fatalf("debit_seq=%d", got)
 	}
 	ok, err := c.SufficientBalance(context.Background(), []byte("s"), "w", 1)
 	if err != nil {

@@ -57,6 +57,16 @@ type GetTicketParamsRequest struct {
 	Offering   string
 }
 
+// OpenSessionRequest is the worker-side projection of the daemon's
+// authoritative payee session-open contract.
+type OpenSessionRequest struct {
+	WorkID              string
+	Capability          string
+	Offering            string
+	PricePerWorkUnitWei string
+	WorkUnit            string
+}
+
 // TicketParams is the worker-side projection of the proto TicketParams.
 type TicketParams struct {
 	Recipient         []byte
@@ -160,6 +170,25 @@ func (c *Client) GetTicketParams(ctx context.Context, req GetTicketParamsRequest
 	}, nil
 }
 
+// OpenSession satisfies paymentbroker.Broker.
+func (c *Client) OpenSession(ctx context.Context, req paymentbroker.SessionBinding) error {
+	if req.WorkID == "" {
+		return errors.New("paymentclient: work_id is required")
+	}
+	priceWei := new(big.Int)
+	if _, ok := priceWei.SetString(req.PricePerWorkUnitWei, 10); !ok {
+		return fmt.Errorf("paymentclient: invalid price_per_work_unit_wei %q", req.PricePerWorkUnitWei)
+	}
+	_, err := c.rpc.OpenSession(ctx, &pmt.OpenSessionRequest{
+		WorkId:              req.WorkID,
+		Capability:          req.Capability,
+		Offering:            req.Offering,
+		PricePerWorkUnitWei: priceWei.Bytes(),
+		WorkUnit:            req.WorkUnit,
+	})
+	return err
+}
+
 // ProcessPayment satisfies paymentbroker.Broker.
 func (c *Client) ProcessPayment(ctx context.Context, paymentBytes []byte, workID string) (paymentbroker.Receipt, error) {
 	resp, err := c.rpc.ProcessPayment(ctx, &pmt.ProcessPaymentRequest{
@@ -177,14 +206,10 @@ func (c *Client) ProcessPayment(ctx context.Context, paymentBytes []byte, workID
 	}, nil
 }
 
-// DebitBalance satisfies paymentbroker.Broker. The debitSeq parameter is
-// not part of the wire payload at v1 — receiver-side idempotency relies on
-// the (sender, work_id, work_units) tuple plus the pattern doc's
-// recommendation to retry the same call. Reserved for a future wire
-// extension.
-func (c *Client) DebitBalance(ctx context.Context, sender []byte, workID string, units int64, _ uint64) ([]byte, error) {
+// DebitBalance satisfies paymentbroker.Broker.
+func (c *Client) DebitBalance(ctx context.Context, sender []byte, workID string, units int64, debitSeq uint64) ([]byte, error) {
 	resp, err := c.rpc.DebitBalance(ctx, &pmt.DebitBalanceRequest{
-		Sender: sender, WorkId: workID, WorkUnits: units,
+		Sender: sender, WorkId: workID, WorkUnits: units, DebitSeq: debitSeq,
 	})
 	if err != nil {
 		return nil, err

@@ -9,9 +9,10 @@ Go daemon that performs FFmpeg-subprocess transcoding (VOD / ABR / Live HLS) on 
 ## What it is
 
 - **Workload-only** Go daemon. No `chain-commons`, no Stripe, no shell concerns.
-- **Three runtime modes** (`--mode=vod|abr|live`) — pick one per process.
+- **Unified worker runtime** — one process serves VOD, ABR, and live together.
 - **Three GPU build variants** (NVIDIA / Intel / AMD) — same source, three Docker tags.
-- **Workload contracts:** HTTP `/v1/video/*` + `/stream/*` (`:8081`), `GET /health`, `GET /registry/offerings`, `POST /v1/payment/ticket-params`, RTMP ingest (`:1935`), Prometheus `/metrics` (`:9091`), and gRPC into co-located `livepeer-payment-daemon` (receiver) over `/var/run/livepeer/payment.sock`.
+- **Payment contract** — consumes `livepeer-payment-daemon v4.0.0` payee sessions (`OpenSession`, sender sealing on first `ProcessPayment`, wire-level `debit_seq`, terminal `CloseSession`).
+- **Workload contracts:** unified HTTP `/v1/video/*` + `/stream/*` + `/api/sessions/*` (`:8081`), `GET /health`, `GET /registry/offerings`, `POST /v1/payment/ticket-params`, RTMP ingest (`:1935`), Prometheus `/metrics` (`:9091`), and gRPC into co-located `livepeer-payment-daemon` (receiver) over `/var/run/livepeer/payment.sock`.
 
 ## Where to start
 

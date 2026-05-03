@@ -32,6 +32,7 @@ const (
 	PayeeDaemon_GetQuote_FullMethodName               = "/livepeer.payments.v1.PayeeDaemon/GetQuote"
 	PayeeDaemon_GetTicketParams_FullMethodName        = "/livepeer.payments.v1.PayeeDaemon/GetTicketParams"
 	PayeeDaemon_ListCapabilities_FullMethodName       = "/livepeer.payments.v1.PayeeDaemon/ListCapabilities"
+	PayeeDaemon_OpenSession_FullMethodName            = "/livepeer.payments.v1.PayeeDaemon/OpenSession"
 	PayeeDaemon_ProcessPayment_FullMethodName         = "/livepeer.payments.v1.PayeeDaemon/ProcessPayment"
 	PayeeDaemon_DebitBalance_FullMethodName           = "/livepeer.payments.v1.PayeeDaemon/DebitBalance"
 	PayeeDaemon_SufficientBalance_FullMethodName      = "/livepeer.payments.v1.PayeeDaemon/SufficientBalance"
@@ -60,14 +61,20 @@ type PayeeDaemonClient interface {
 	// Return the daemon's full configured capability catalog. Drives the
 	// worker's /capabilities HTTP response.
 	ListCapabilities(ctx context.Context, in *ListCapabilitiesRequest, opts ...grpc.CallOption) (*ListCapabilitiesResponse, error)
+	// Open a payee-side session and bind authoritative pricing metadata to
+	// `work_id`. The worker later seals the session's sender on the first
+	// successful ProcessPayment.
+	OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionResponse, error)
 	// Validate an incoming payment blob, credit the sender's balance by the
 	// payment's expected value, and queue any winning tickets for redemption.
+	// Requires a previously-opened session for `work_id`.
 	ProcessPayment(ctx context.Context, in *ProcessPaymentRequest, opts ...grpc.CallOption) (*ProcessPaymentResponse, error)
-	// Debit work units from a (sender, work_id) balance after the payee has
-	// actually done the work. Returns the new balance.
+	// Debit session-priced work units from a (sender, work_id) balance after the
+	// payee has actually done the work. Retries are idempotent by
+	// (sender, work_id, debit_seq). Returns the new balance.
 	DebitBalance(ctx context.Context, in *DebitBalanceRequest, opts ...grpc.CallOption) (*DebitBalanceResponse, error)
 	// Check whether a (sender, work_id) balance covers a minimum number of
-	// work units, without debiting.
+	// session-priced work units, without debiting.
 	SufficientBalance(ctx context.Context, in *SufficientBalanceRequest, opts ...grpc.CallOption) (*SufficientBalanceResponse, error)
 	// Get the current balance for a (sender, work_id) pair.
 	GetBalance(ctx context.Context, in *GetBalanceRequest, opts ...grpc.CallOption) (*GetBalanceResponse, error)
@@ -114,6 +121,16 @@ func (c *payeeDaemonClient) ListCapabilities(ctx context.Context, in *ListCapabi
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListCapabilitiesResponse)
 	err := c.cc.Invoke(ctx, PayeeDaemon_ListCapabilities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *payeeDaemonClient) OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenSessionResponse)
+	err := c.cc.Invoke(ctx, PayeeDaemon_OpenSession_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -209,14 +226,20 @@ type PayeeDaemonServer interface {
 	// Return the daemon's full configured capability catalog. Drives the
 	// worker's /capabilities HTTP response.
 	ListCapabilities(context.Context, *ListCapabilitiesRequest) (*ListCapabilitiesResponse, error)
+	// Open a payee-side session and bind authoritative pricing metadata to
+	// `work_id`. The worker later seals the session's sender on the first
+	// successful ProcessPayment.
+	OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionResponse, error)
 	// Validate an incoming payment blob, credit the sender's balance by the
 	// payment's expected value, and queue any winning tickets for redemption.
+	// Requires a previously-opened session for `work_id`.
 	ProcessPayment(context.Context, *ProcessPaymentRequest) (*ProcessPaymentResponse, error)
-	// Debit work units from a (sender, work_id) balance after the payee has
-	// actually done the work. Returns the new balance.
+	// Debit session-priced work units from a (sender, work_id) balance after the
+	// payee has actually done the work. Retries are idempotent by
+	// (sender, work_id, debit_seq). Returns the new balance.
 	DebitBalance(context.Context, *DebitBalanceRequest) (*DebitBalanceResponse, error)
 	// Check whether a (sender, work_id) balance covers a minimum number of
-	// work units, without debiting.
+	// session-priced work units, without debiting.
 	SufficientBalance(context.Context, *SufficientBalanceRequest) (*SufficientBalanceResponse, error)
 	// Get the current balance for a (sender, work_id) pair.
 	GetBalance(context.Context, *GetBalanceRequest) (*GetBalanceResponse, error)
@@ -246,6 +269,9 @@ func (UnimplementedPayeeDaemonServer) GetTicketParams(context.Context, *GetTicke
 }
 func (UnimplementedPayeeDaemonServer) ListCapabilities(context.Context, *ListCapabilitiesRequest) (*ListCapabilitiesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListCapabilities not implemented")
+}
+func (UnimplementedPayeeDaemonServer) OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method OpenSession not implemented")
 }
 func (UnimplementedPayeeDaemonServer) ProcessPayment(context.Context, *ProcessPaymentRequest) (*ProcessPaymentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProcessPayment not implemented")
@@ -338,6 +364,24 @@ func _PayeeDaemon_ListCapabilities_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(PayeeDaemonServer).ListCapabilities(ctx, req.(*ListCapabilitiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PayeeDaemon_OpenSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PayeeDaemonServer).OpenSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PayeeDaemon_OpenSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PayeeDaemonServer).OpenSession(ctx, req.(*OpenSessionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -486,6 +530,10 @@ var PayeeDaemon_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListCapabilities",
 			Handler:    _PayeeDaemon_ListCapabilities_Handler,
+		},
+		{
+			MethodName: "OpenSession",
+			Handler:    _PayeeDaemon_OpenSession_Handler,
 		},
 		{
 			MethodName: "ProcessPayment",

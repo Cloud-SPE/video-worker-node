@@ -37,7 +37,14 @@ type CreatePaymentRequest struct {
 	// Recipient orchestrator identity (the on-chain payee address), 20 raw
 	// bytes. The daemon resolves a worker URL for this address via the local
 	// service-registry-daemon resolver.
-	Recipient     []byte `protobuf:"bytes,2,opt,name=recipient,proto3" json:"recipient,omitempty"`
+	Recipient []byte `protobuf:"bytes,2,opt,name=recipient,proto3" json:"recipient,omitempty"`
+	// Capability being purchased, e.g. "openai:/v1/chat/completions". Sender
+	// mode forwards this to the payee-side ticket-params endpoint so the worker
+	// can validate the request against its offered routes.
+	Capability string `protobuf:"bytes,3,opt,name=capability,proto3" json:"capability,omitempty"`
+	// Offering within the capability being purchased, e.g. a model identifier.
+	// Sender mode forwards this to the payee-side ticket-params endpoint.
+	Offering      string `protobuf:"bytes,4,opt,name=offering,proto3" json:"offering,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -84,6 +91,20 @@ func (x *CreatePaymentRequest) GetRecipient() []byte {
 		return x.Recipient
 	}
 	return nil
+}
+
+func (x *CreatePaymentRequest) GetCapability() string {
+	if x != nil {
+		return x.Capability
+	}
+	return ""
+}
+
+func (x *CreatePaymentRequest) GetOffering() string {
+	if x != nil {
+		return x.Offering
+	}
+	return ""
 }
 
 type CreatePaymentResponse struct {
@@ -255,11 +276,15 @@ var File_livepeer_payments_v1_payer_daemon_proto protoreflect.FileDescriptor
 
 const file_livepeer_payments_v1_payer_daemon_proto_rawDesc = "" +
 	"\n" +
-	"'livepeer/payments/v1/payer_daemon.proto\x12\x14livepeer.payments.v1\"S\n" +
+	"'livepeer/payments/v1/payer_daemon.proto\x12\x14livepeer.payments.v1\"\x8f\x01\n" +
 	"\x14CreatePaymentRequest\x12\x1d\n" +
 	"\n" +
 	"face_value\x18\x01 \x01(\fR\tfaceValue\x12\x1c\n" +
-	"\trecipient\x18\x02 \x01(\fR\trecipient\"\x8c\x01\n" +
+	"\trecipient\x18\x02 \x01(\fR\trecipient\x12\x1e\n" +
+	"\n" +
+	"capability\x18\x03 \x01(\tR\n" +
+	"capability\x12\x1a\n" +
+	"\boffering\x18\x04 \x01(\tR\boffering\"\x8c\x01\n" +
 	"\x15CreatePaymentResponse\x12#\n" +
 	"\rpayment_bytes\x18\x01 \x01(\fR\fpaymentBytes\x12'\n" +
 	"\x0ftickets_created\x18\x02 \x01(\x05R\x0eticketsCreated\x12%\n" +

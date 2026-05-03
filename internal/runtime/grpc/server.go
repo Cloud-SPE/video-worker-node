@@ -19,7 +19,9 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/scheduler"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
+	"github.com/Cloud-SPE/video-worker-node/internal/service/abrrunner"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/jobrunner"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/liverunner"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/presetloader"
@@ -66,7 +68,9 @@ type Config struct {
 	GPU        types.GPUProfile
 	Repo       *jobs.Repo
 	JobRunner  *jobrunner.Runner
+	ABRRunner  *abrrunner.Runner
 	LiveRunner *liverunner.Runner
+	Scheduler  scheduler.Controller
 	Presets    *presetloader.Loader
 	StartedAt  time.Time
 	Logger     *slog.Logger
@@ -135,10 +139,33 @@ func (s *Server) GetJob(ctx context.Context, id string) (types.Job, error) {
 func (s *Server) GetCapacity(_ context.Context) (types.CapacityReport, error) {
 	rep := types.CapacityReport{Mode: s.cfg.Mode, GPU: s.cfg.GPU}
 	if s.cfg.JobRunner != nil {
+		rep.MaxQueueSize = s.cfg.JobRunner.MaxConcurrent()
+		rep.ActiveJobs += s.cfg.JobRunner.ActiveCount()
 		rep.QueuedJobs = s.cfg.JobRunner.QueueDepth()
+	}
+	if s.cfg.ABRRunner != nil {
+		if rep.MaxQueueSize == 0 {
+			rep.MaxQueueSize = s.cfg.ABRRunner.MaxConcurrent()
+		}
+		rep.ActiveJobs += s.cfg.ABRRunner.ActiveCount()
+		rep.QueuedJobs += s.cfg.ABRRunner.QueueDepth()
 	}
 	if s.cfg.LiveRunner != nil {
 		rep.ActiveStreams = s.cfg.LiveRunner.ActiveCount()
+	}
+	if s.cfg.Scheduler != nil {
+		snap := s.cfg.Scheduler.Snapshot()
+		rep.GPUSlotsTotal = snap.TotalSlots
+		rep.GPULiveReserved = snap.LiveReservedSlots
+		rep.GPUCostTotal = snap.TotalCost
+		rep.GPULiveReservedCost = snap.LiveReservedCost
+		rep.GPUActiveSlots = snap.ActiveSlots
+		rep.GPUActiveBatch = snap.ActiveBatchSlots
+		rep.GPUActiveLive = snap.ActiveLiveSlots
+		rep.GPUActiveCost = snap.ActiveCost
+		rep.GPUActiveBatchCost = snap.ActiveBatchCost
+		rep.GPUActiveLiveCost = snap.ActiveLiveCost
+		rep.GPUQueuedBatchJobs = snap.QueuedBatch
 	}
 	return rep, nil
 }

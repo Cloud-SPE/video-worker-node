@@ -200,6 +200,57 @@ func TestRunLoopExitsOnCtx(t *testing.T) {
 	}
 }
 
+func TestRunUsesWorkerPool(t *testing.T) {
+	t.Parallel()
+	r, _, _, _, _ := newTestEnv(t)
+	r.cfg.FFmpeg = &ffmpeg.FakeRunner{Steps: 5, PerStep: 100 * time.Millisecond}
+	r.cfg.MaxConcurrent = 2
+	plans := map[string]ABRJob{
+		"j1": {
+			JobID: "j1", InputURL: "http://in/x", MasterOutputURL: "http://master/1",
+			PresetNames:      []string{"360p"},
+			RenditionOutputs: map[string]string{"360p": "http://r/1"},
+		},
+		"j2": {
+			JobID: "j2", InputURL: "http://in/x", MasterOutputURL: "http://master/2",
+			PresetNames:      []string{"360p"},
+			RenditionOutputs: map[string]string{"360p": "http://r/2"},
+		},
+	}
+	for _, plan := range plans {
+		if err := r.Submit(context.Background(), plan); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- r.Run(ctx, func(id string) (ABRJob, bool) {
+			plan, ok := plans[id]
+			return plan, ok
+		})
+	}()
+
+	waitForActiveABRJobs(t, r, 2)
+	cancel()
+	if err := <-done; err != context.Canceled {
+		t.Fatalf("run err=%v", err)
+	}
+}
+
+func waitForActiveABRJobs(t *testing.T, r *Runner, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if r.ActiveCount() >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("active abr jobs=%d, want >= %d", r.ActiveCount(), want)
+}
+
 func TestNewValidations(t *testing.T) {
 	t.Parallel()
 	if _, err := New(Config{}); err == nil {

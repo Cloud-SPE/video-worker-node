@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,10 +19,12 @@ import (
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/logger"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/probe"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/scheduler"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/shellclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/storage"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/store"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/webhooks"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/workloadcost"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/runtime/grpc"
 	httpsurface "github.com/Cloud-SPE/video-worker-node/internal/runtime/http"
@@ -41,7 +44,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("livepeer-video-worker-node", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	mode := fs.String("mode", "vod", "vod | abr | live")
+	mode := fs.String("mode", "all", "all | vod | abr | live")
 	dev := fs.Bool("dev", false, "use FakeFFmpeg + fake clients (no real chain / GPU detection)")
 	logLevel := fs.String("log-level", "info", "log level: error|warn|info|debug")
 	logFormat := fs.String("log-format", "text", "log format: text|json")
@@ -50,6 +53,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	gpuVendor := fs.String("gpu-vendor", "auto", "auto|nvidia|intel|amd")
 	ffmpegBin := fs.String("ffmpeg-bin", "/usr/local/bin/ffmpeg", "path to ffmpeg binary")
 	maxQueueSize := fs.Int("max-queue-size", 5, "max concurrent VOD/ABR jobs")
+	gpuSlots := fs.Int("gpu-slots", 0, "override total scheduler slots; 0 = auto from detected GPU")
+	liveReservedSlots := fs.Int("gpu-live-reserved-slots", 1, "slots reserved for live admission")
+	gpuCostCapacity := fs.Int("gpu-cost-capacity", 0, "override total scheduler cost capacity; 0 = auto from gpu-slots")
+	gpuLiveReservedCost := fs.Int("gpu-live-reserved-cost", 0, "override cost capacity reserved for live admission; 0 = auto from live-reserved-slots")
+	gpuBatchCostScale := fs.Float64("gpu-batch-cost-scale", 1.0, "host-level multiplier for batch preset admission cost")
+	gpuLiveCostScale := fs.Float64("gpu-live-cost-scale", 1.25, "host-level multiplier for live preset admission cost")
 	tempDir := fs.String("temp-dir", "/tmp/livepeer-transcode", "scratch directory for ffmpeg")
 
 	httpListen := fs.String("http-listen", ":8080", "public HTTP API listen addr; empty disables")
@@ -102,6 +111,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	cfg.GPUVendor = types.GPUVendor(*gpuVendor)
 	cfg.FFmpegBin = *ffmpegBin
 	cfg.MaxQueueSize = *maxQueueSize
+	cfg.GPUSlots = *gpuSlots
+	cfg.LiveReserve = *liveReservedSlots
+	cfg.GPUCostCapacity = *gpuCostCapacity
+	cfg.GPULiveReserveCost = *gpuLiveReservedCost
+	cfg.GPUBatchCostScale = *gpuBatchCostScale
+	cfg.GPULiveCostScale = *gpuLiveCostScale
 	cfg.TempDir = *tempDir
 	cfg.PresetsFile = *presetsFile
 	cfg.HTTPListen = *httpListen
@@ -166,6 +181,20 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "preflight failed: %v\n", err)
 		return 1
 	}
+	totalSlots := cfg.GPUSlots
+	if totalSlots <= 0 {
+		totalSlots = int(pre.GPU.MaxSessions)
+	}
+	costModel := workloadcost.Model{
+		BatchScale: cfg.GPUBatchCostScale,
+		LiveScale:  cfg.GPULiveCostScale,
+	}.Normalized()
+	gpuScheduler := scheduler.New(scheduler.Config{
+		TotalSlots:        totalSlots,
+		LiveReservedSlots: cfg.LiveReserve,
+		TotalCost:         cfg.GPUCostCapacity,
+		LiveReservedCost:  cfg.GPULiveReserveCost,
+	})
 
 	// Store
 	var st store.Store
@@ -239,26 +268,35 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	// manifest. capabilityreporter + registryclient packages removed;
 	// --registry-socket / --registry-refresh flags removed.
 
-	// Build runners by mode.
+	// Build runners. Unified mode wires all three in one process.
 	abrPlans := newPlanRegistry()
 	var jobR *jobrunner.Runner
 	var abrR *abrrunner.Runner
 	var liveR *liverunner.Runner
 
-	switch {
-	case cfg.Mode.IsVOD():
+	if cfg.Mode.IsVOD() {
 		jobR, err = jobrunner.New(jobrunner.Config{
 			Repo: repo, FFmpeg: ffRunner, Probe: probe.NewSystem(), Storage: stg,
 			Webhook: wh, Payment: paymentBroker, Presets: pl, GPU: pre.GPU,
-			TempDir: cfg.TempDir, MaxQueue: cfg.MaxQueueSize, Logger: log,
+			TempDir: cfg.TempDir, MaxQueue: cfg.MaxQueueSize, Scheduler: gpuScheduler, CostModel: costModel, Logger: log,
 		})
-	case cfg.Mode.IsABR():
+		if err != nil {
+			fmt.Fprintf(stderr, "runner: %v\n", err)
+			return 1
+		}
+	}
+	if cfg.Mode.IsABR() {
 		abrR, err = abrrunner.New(abrrunner.Config{
 			Repo: repo, FFmpeg: ffRunner, Probe: probe.NewSystem(), Storage: stg,
 			Webhook: wh, Payment: paymentBroker, Presets: pl, GPU: pre.GPU,
-			TempDir: cfg.TempDir, Logger: log,
+			TempDir: cfg.TempDir, Scheduler: gpuScheduler, CostModel: costModel, MaxConcurrent: cfg.MaxQueueSize, Logger: log,
 		})
-	case cfg.Mode.IsLive():
+		if err != nil {
+			fmt.Fprintf(stderr, "runner: %v\n", err)
+			return 1
+		}
+	}
+	if cfg.Mode.IsLive() {
 		// FFmpeg subprocess wiring lands in §D; until then the runner
 		// uses the drain encoder so the state machine + payment loop
 		// exercise even without a real GPU encode.
@@ -280,8 +318,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 			shellCl = shellclient.NewFake()
 		}
 
-		// Build the ladder from the loaded preset catalogue.
-		ladder := pl.FilterByGPU(pre.GPU)
+		// Build the live ladder from the loaded preset catalogue. When a
+		// unified preset file is used, keep only the live-tagged rungs.
+		ladder := liveLadder(pl.FilterByGPU(pre.GPU))
 
 		liveLocalDirRoot := filepath.Join(cfg.TempDir, "live")
 		var encFactory liverunner.EncoderFactory
@@ -319,6 +358,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		liveR, err = liverunner.New(liverunner.Config{
 			Repo: repo, Webhook: wh, Payment: paymentBroker, Presets: pl,
 			GPU: pre.GPU, Logger: log,
+			Scheduler:            gpuScheduler,
+			CostModel:            costModel,
 			Shell:                shellCl,
 			WorkerURL:            cfg.PublicURL,
 			LivePreset:           cfg.LivePreset,
@@ -344,11 +385,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		Mode: cfg.Mode, Dev: cfg.Dev, Repo: repo,
 		JobRunner: jobR, ABRRunner: abrR, LiveRunner: liveR,
 		Payment: paymentBroker, Payee: pmtClient, Presets: pl,
+		Scheduler:  gpuScheduler,
 		Prober:     probe.NewSystem(),
 		APIVersion: cfg.APIVersion, ProtocolVersion: cfg.ProtocolVersion,
 		WorkerEthAddress:     cfg.WorkerEthAddress,
 		RegistryCapabilities: cfg.Capabilities,
-		AuthToken:            cfg.AuthToken, Logger: log,
+		AuthToken:            cfg.AuthToken, MaxConcurrent: cfg.MaxQueueSize, Logger: log,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "http: %v\n", err)
@@ -358,7 +400,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	// gRPC operator surface
 	grpcSrv, err := grpc.New(grpc.Config{
 		Mode: cfg.Mode, Version: version, Dev: cfg.Dev, GPU: pre.GPU,
-		Repo: repo, JobRunner: jobR, LiveRunner: liveR, Presets: pl,
+		Repo: repo, JobRunner: jobR, ABRRunner: abrR, LiveRunner: liveR, Scheduler: gpuScheduler, Presets: pl,
 		StartedAt: time.Now(), Logger: log,
 	})
 	if err != nil {
@@ -371,6 +413,36 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "metrics: %v\n", err)
 		return 1
+	}
+	if metricsSrv != nil {
+		metricsSrv.SetSnapshotFunc(func() metrics.Snapshot {
+			snap := metrics.Snapshot{
+				GPUVendor:      pre.GPU.Vendor.String(),
+				GPUMaxSessions: int(pre.GPU.MaxSessions),
+			}
+			if jobR != nil {
+				snap.ActiveJobs += jobR.ActiveCount()
+			}
+			if abrR != nil {
+				snap.ActiveJobs += abrR.ActiveCount()
+			}
+			if liveR != nil {
+				snap.ActiveStreams = liveR.ActiveCount()
+			}
+			if gpuScheduler != nil {
+				schedulerSnap := gpuScheduler.Snapshot()
+				snap.Scheduler = metrics.SchedulerSnapshot{
+					TotalSlots:        schedulerSnap.TotalSlots,
+					LiveReservedSlots: schedulerSnap.LiveReservedSlots,
+					TotalCost:         schedulerSnap.TotalCost,
+					LiveReservedCost:  schedulerSnap.LiveReservedCost,
+					ActiveSlots:       schedulerSnap.ActiveSlots,
+					ActiveCost:        schedulerSnap.ActiveCost,
+					QueuedBatch:       schedulerSnap.QueuedBatch,
+				}
+			}
+			return snap
+		})
 	}
 
 	// HTTP listener helper: blocks until ctx cancelled.
@@ -431,6 +503,19 @@ func ensureDir(p string) error {
 		return nil
 	}
 	return os.MkdirAll(p, 0o755)
+}
+
+func liveLadder(presets []types.Preset) []types.Preset {
+	live := make([]types.Preset, 0, len(presets))
+	for _, preset := range presets {
+		if strings.HasSuffix(preset.Name, "-live") {
+			live = append(live, preset)
+		}
+	}
+	if len(live) > 0 {
+		return live
+	}
+	return presets
 }
 
 // abrPlans is a tiny in-memory map for ABR plan lookup. Real

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/logger"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/scheduler"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/store"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/presetloader"
@@ -29,6 +30,7 @@ func newServer(t *testing.T) *Server {
 	repo := jobs.New(store.Memory())
 	s, err := New(Config{
 		Mode: types.ModeVOD, Version: "test", Repo: repo, Presets: pl,
+		Scheduler: scheduler.New(scheduler.Config{TotalSlots: 4, LiveReservedSlots: 1}),
 		StartedAt: time.Now(), Logger: logger.Discard(),
 	})
 	if err != nil {
@@ -86,6 +88,18 @@ func TestGetCapacity(t *testing.T) {
 	}
 	if rep.Mode != types.ModeVOD {
 		t.Errorf("mode=%s", rep.Mode)
+	}
+	if rep.GPUSlotsTotal != 4 {
+		t.Errorf("gpu_slots_total=%d", rep.GPUSlotsTotal)
+	}
+	if rep.GPULiveReserved != 1 {
+		t.Errorf("gpu_live_reserved_slots=%d", rep.GPULiveReserved)
+	}
+	if rep.GPUCostTotal != 400 {
+		t.Errorf("gpu_cost_total=%d", rep.GPUCostTotal)
+	}
+	if rep.GPULiveReservedCost != 100 {
+		t.Errorf("gpu_live_reserved_cost=%d", rep.GPULiveReservedCost)
 	}
 }
 

@@ -46,6 +46,13 @@ const (
 	NameRegistryRefreshTotal = "livepeer_videoworker_registry_refresh_total"
 	NameGPUDetected          = "livepeer_videoworker_gpu_detected"
 	NameGPUMaxSessions       = "livepeer_videoworker_gpu_max_sessions"
+	NameGPUSlotsTotal        = "livepeer_videoworker_gpu_slots_total"
+	NameGPUSessionsInflight  = "livepeer_videoworker_gpu_sessions_inflight"
+	NameGPULiveReserved      = "livepeer_videoworker_gpu_live_reserved_slots"
+	NameGPUCostCapacity      = "livepeer_videoworker_gpu_cost_capacity"
+	NameGPUCostInflight      = "livepeer_videoworker_gpu_cost_inflight"
+	NameGPULiveReservedCost  = "livepeer_videoworker_gpu_live_reserved_cost"
+	NameGPUBatchQueued       = "livepeer_videoworker_gpu_batch_queue_depth"
 )
 
 // Timer is a small helper that records elapsed time on Stop().

@@ -77,9 +77,15 @@ type Config struct {
 	IgnoreGPULimit bool
 
 	// Job pool
-	MaxQueueSize int
-	TempDir      string
-	JobTTL       time.Duration
+	MaxQueueSize       int
+	TempDir            string
+	JobTTL             time.Duration
+	GPUSlots           int
+	LiveReserve        int
+	GPUCostCapacity    int
+	GPULiveReserveCost int
+	GPUBatchCostScale  float64
+	GPULiveCostScale   float64
 
 	// Presets
 	PresetsFile string
@@ -143,7 +149,7 @@ type Config struct {
 // override via flags (`cmd/.../run.go`).
 func Default() Config {
 	return Config{
-		Mode:                    types.ModeVOD,
+		Mode:                    types.ModeUnified,
 		Version:                 "dev",
 		Dev:                     false,
 		NodeID:                  "transcode-worker-node",
@@ -154,6 +160,12 @@ func Default() Config {
 		MaxQueueSize:            5,
 		TempDir:                 "/tmp/livepeer-transcode",
 		JobTTL:                  24 * time.Hour,
+		GPUSlots:                0,
+		LiveReserve:             1,
+		GPUCostCapacity:         0,
+		GPULiveReserveCost:      0,
+		GPUBatchCostScale:       1.0,
+		GPULiveCostScale:        1.25,
 		PresetsFile:             "presets/h264-streaming.yaml",
 		HTTPListen:              ":8080",
 		GRPCSocket:              "",
@@ -203,6 +215,12 @@ func (c Config) Validate() error {
 	}
 	if c.TempDir == "" {
 		return errors.New("temp_dir must be set")
+	}
+	if c.GPUBatchCostScale <= 0 {
+		return errors.New("gpu_batch_cost_scale must be > 0")
+	}
+	if c.GPULiveCostScale <= 0 {
+		return errors.New("gpu_live_cost_scale must be > 0")
 	}
 	if c.HTTPListen == "" && !c.Dev {
 		return errors.New("http_listen must be set in non-dev mode")

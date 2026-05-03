@@ -16,6 +16,9 @@ import (
 
 // Broker is the runner-facing payment surface.
 type Broker interface {
+	// OpenSession binds authoritative pricing/session metadata to workID.
+	// The first successful ProcessPayment later seals the sender.
+	OpenSession(ctx context.Context, binding SessionBinding) error
 	// ProcessPayment validates an incoming payment ticket and credits the
 	// (sender, work_id) balance. Returns the credited amount in wei and
 	// the new balance.
@@ -29,6 +32,16 @@ type Broker interface {
 	SufficientBalance(ctx context.Context, sender []byte, workID string, minUnits int64) (bool, error)
 	// CloseSession releases any residual credit and garbage-collects.
 	CloseSession(ctx context.Context, sender []byte, workID string) error
+}
+
+// SessionBinding describes the authoritative payee-side metadata for a
+// work session before the first payment seals sender.
+type SessionBinding struct {
+	WorkID              string
+	Capability          string
+	Offering            string
+	PricePerWorkUnitWei string
+	WorkUnit            string
 }
 
 // Receipt describes the result of a ProcessPayment call.
@@ -50,6 +63,7 @@ type Fake struct {
 	mu       sync.Mutex
 	balances map[string]int64
 	debits   []FakeDebit
+	opens    map[string]SessionBinding
 	closed   map[string]bool
 	closes   map[string]int
 
@@ -74,7 +88,13 @@ type FakeDebit struct {
 
 // NewFake returns an empty Fake. Default CreditPerProcess is 100.
 func NewFake() *Fake {
-	return &Fake{balances: map[string]int64{}, closed: map[string]bool{}, closes: map[string]int{}, CreditPerProcess: 100}
+	return &Fake{
+		balances:         map[string]int64{},
+		opens:            map[string]SessionBinding{},
+		closed:           map[string]bool{},
+		closes:           map[string]int{},
+		CreditPerProcess: 100,
+	}
 }
 
 // CreditFor sets the balance for a workID directly. Used in tests to
@@ -83,6 +103,14 @@ func (f *Fake) CreditFor(workID string, units int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.balances[workID] += units
+}
+
+// OpenSession satisfies Broker.
+func (f *Fake) OpenSession(_ context.Context, binding SessionBinding) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opens[binding.WorkID] = binding
+	return nil
 }
 
 // ProcessPayment satisfies Broker. Always credits a fixed 100 units per call
@@ -158,4 +186,12 @@ func (f *Fake) CloseCount(workID string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closes[workID]
+}
+
+// OpenedBinding returns the last opened binding for workID.
+func (f *Fake) OpenedBinding(workID string) (SessionBinding, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	binding, ok := f.opens[workID]
+	return binding, ok
 }

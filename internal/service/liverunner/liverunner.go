@@ -50,8 +50,10 @@ import (
 	"time"
 
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/ingest"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/scheduler"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/shellclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/webhooks"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/workloadcost"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/livecdn"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/paymentbroker"
@@ -70,12 +72,14 @@ type EncoderFactory func() Encoder
 
 // Config wires the runner.
 type Config struct {
-	Repo    *jobs.Repo
-	Webhook webhooks.Sender
-	Payment paymentbroker.Broker
-	Presets *presetloader.Loader
-	GPU     types.GPUProfile
-	Logger  *slog.Logger
+	Repo      *jobs.Repo
+	Webhook   webhooks.Sender
+	Payment   paymentbroker.Broker
+	Presets   *presetloader.Loader
+	GPU       types.GPUProfile
+	Logger    *slog.Logger
+	Scheduler scheduler.Controller
+	CostModel workloadcost.Model
 
 	Ingest ingest.IngestProvider
 	Shell  shellclient.Client
@@ -159,6 +163,7 @@ type streamCtl struct {
 	encoder         Encoder
 	mirror          *livecdn.Mirror
 	done            chan struct{}
+	lease           scheduler.Lease
 	patternBSender  []byte
 	patternBWorkID  string
 	workerSessionID string
@@ -255,6 +260,7 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	cfg.CostModel = cfg.CostModel.Normalized()
 	return &Runner{
 		cfg:     cfg,
 		streams: make(map[string]*streamCtl),
@@ -330,7 +336,27 @@ func (r *Runner) Accept(ctx context.Context, sess ingest.IngestSession) (ingest.
 
 	// 4. Spawn the per-stream goroutine.
 	streamCtx, cancel := context.WithCancel(ctx)
+	cancelOnError := true
+	defer func() {
+		if cancelOnError {
+			cancel()
+		}
+	}()
 	enc := r.cfg.EncoderFactory()
+	var lease scheduler.Lease
+	if r.cfg.Scheduler != nil {
+		lease, err = r.cfg.Scheduler.Acquire(ctx, scheduler.Request{
+			Workload: scheduler.WorkloadLive,
+			Slots:    1,
+			Cost:     r.liveAdmissionCost(),
+		})
+		if err != nil {
+			if errors.Is(err, scheduler.ErrCapacityExceeded) {
+				return ingest.Acceptance{}, ingest.ErrCapacityExceeded
+			}
+			return ingest.Acceptance{}, fmt.Errorf("scheduler acquire: %w", err)
+		}
+	}
 
 	// Mirror + master manifest, if configured. The mirror is per-session
 	// because the SinkPrefix encodes the stream id.
@@ -361,6 +387,7 @@ func (r *Runner) Accept(ctx context.Context, sess ingest.IngestSession) (ingest.
 	ctl.encoder = enc
 	ctl.mirror = mirror
 	ctl.done = make(chan struct{})
+	ctl.lease = lease
 	if ctl.reason == "" {
 		ctl.reason = sessionEndReasonGraceful
 	}
@@ -385,6 +412,7 @@ func (r *Runner) Accept(ctx context.Context, sess ingest.IngestSession) (ingest.
 	}
 
 	go r.runSession(streamCtx, ctl, sess, validate)
+	cancelOnError = false
 
 	return ingest.Acceptance{
 		OnEnd: func(reason string) {
@@ -402,6 +430,26 @@ func (r *Runner) Accept(ctx context.Context, sess ingest.IngestSession) (ingest.
 	}, nil
 }
 
+func (r *Runner) liveAdmissionCost() int {
+	if r.cfg.Presets == nil {
+		return workloadcost.Default()
+	}
+	if preset, ok := r.cfg.Presets.Lookup(r.cfg.LivePreset); ok {
+		return r.cfg.CostModel.ForLivePreset(preset)
+	}
+	ladder := r.cfg.Presets.Catalogue().Presets
+	maxCost := 0
+	for _, preset := range ladder {
+		if cost := r.cfg.CostModel.ForLivePreset(preset); cost > maxCost {
+			maxCost = cost
+		}
+	}
+	if maxCost > 0 {
+		return maxCost
+	}
+	return workloadcost.Default()
+}
+
 // runSession drives one stream's lifecycle: encoder + payment ticker.
 func (r *Runner) runSession(
 	ctx context.Context,
@@ -412,6 +460,9 @@ func (r *Runner) runSession(
 	defer close(ctl.done)
 	defer func() {
 		_ = sess.Close()
+		if ctl.lease != nil {
+			ctl.lease.Release()
+		}
 		r.mu.Lock()
 		delete(r.streams, v.StreamID)
 		r.mu.Unlock()

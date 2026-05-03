@@ -1,7 +1,7 @@
 ---
 title: Worker module architecture
 status: drafted
-last-reviewed: 2026-04-26
+last-reviewed: 2026-05-03
 ---
 
 # Worker module architecture
@@ -22,32 +22,43 @@ Two enforcement mechanisms:
    `no-secrets-in-logs`, plus stubs for `layer-check` and `doc-gardener`
    to consolidate when depguard isn't expressive enough.
 
-## Per-mode wiring (compile-time)
+## Unified runner wiring
 
-The cmd entry inspects `--mode=` and constructs only the runner needed:
+The canonical worker architecture wires all three runners in one
+process:
 
-```go
-switch {
-case cfg.Mode.IsVOD():
-    jobR, err = jobrunner.New(jobrunner.Config{ ... })
-case cfg.Mode.IsABR():
-    abrR, err = abrrunner.New(abrrunner.Config{ ... })
-case cfg.Mode.IsLive():
-    liveR, err = liverunner.New(liverunner.Config{ ... })
-}
-```
+- `jobrunner` for VOD
+- `abrrunner` for ABR
+- `liverunner` for live
 
-Each runner carries its own minimal dependency set (FFmpeg, storage,
-webhooks, payment, presets, GPU profile). No runner depends on another.
+Each runner still carries its own minimal dependency set (FFmpeg,
+storage, webhooks, payment, presets, GPU profile), but the cmd entry no
+longer treats them as mutually exclusive. The architectural boundary is
+now:
 
-The HTTP layer rejects mismatched paths with `501 Not Implemented`:
+- one worker process
+- one HTTP surface
+- one RTMP ingest surface
+- one shared GPU scheduler
 
-- VOD path called when `--mode=abr` → 501.
-- Live path called when `--mode=vod` → 501.
-- Same vice-versa.
+The HTTP layer should route based on runner availability and scheduler
+admission, not a process-wide mode switch. The old `501 wrong_mode`
+behavior is no longer the target architecture.
 
-A future `--mode=multi` (out of MVP scope) would wire all three
-runners. Tracked in this module's tech-debt-tracker if/when needed.
+## Scheduler boundary
+
+The shared GPU scheduler belongs behind a provider boundary and is
+consumed by all three runners. First-cut scheduling is slot-based with
+static preset-derived cost weighting:
+
+- batch queueing
+- live reserved headroom
+- fail-fast live overload
+- operator overrides on top of detected GPU profile
+- preset-derived workload cost as a secondary admission gate
+
+The scheduler API should remain vendor-neutral even though NVIDIA,
+Intel, and AMD execution paths differ underneath.
 
 ## Why the worker has no `runtime/dispatch/` layer
 

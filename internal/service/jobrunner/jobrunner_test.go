@@ -225,6 +225,45 @@ func TestRunLoopExitsOnCtx(t *testing.T) {
 	}
 }
 
+func TestRunUsesWorkerPool(t *testing.T) {
+	t.Parallel()
+	r, stg, _, _, _ := newTestEnv(t)
+	r.cfg.FFmpeg = &ffmpeg.FakeRunner{Steps: 5, PerStep: 100 * time.Millisecond}
+	stg.Inputs["http://in/y"] = []byte("video bytes")
+	for _, job := range []types.Job{
+		{ID: "j1", InputURL: "http://in/x", OutputURL: "http://out/1", Preset: "720p"},
+		{ID: "j2", InputURL: "http://in/y", OutputURL: "http://out/2", Preset: "720p"},
+	} {
+		if _, err := r.Submit(context.Background(), job); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- r.Run(ctx)
+	}()
+
+	waitForActiveJobs(t, r, 2)
+	cancel()
+	if err := <-done; err != context.Canceled {
+		t.Fatalf("run err=%v", err)
+	}
+}
+
+func waitForActiveJobs(t *testing.T, r *Runner, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if r.ActiveCount() >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("active jobs=%d, want >= %d", r.ActiveCount(), want)
+}
+
 func TestNewValidations(t *testing.T) {
 	t.Parallel()
 	if _, err := New(Config{}); err == nil {

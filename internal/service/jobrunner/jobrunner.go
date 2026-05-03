@@ -21,8 +21,10 @@ import (
 
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/ffmpeg"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/probe"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/scheduler"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/storage"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/webhooks"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/workloadcost"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/paymentbroker"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/presetloader"
@@ -31,17 +33,19 @@ import (
 
 // Config wires the runner.
 type Config struct {
-	Repo     *jobs.Repo
-	FFmpeg   ffmpeg.Runner
-	Probe    probe.Prober
-	Storage  storage.Storage
-	Webhook  webhooks.Sender
-	Payment  paymentbroker.Broker
-	Presets  *presetloader.Loader
-	GPU      types.GPUProfile
-	TempDir  string
-	MaxQueue int
-	Logger   *slog.Logger
+	Repo      *jobs.Repo
+	FFmpeg    ffmpeg.Runner
+	Probe     probe.Prober
+	Storage   storage.Storage
+	Webhook   webhooks.Sender
+	Payment   paymentbroker.Broker
+	Presets   *presetloader.Loader
+	GPU       types.GPUProfile
+	Scheduler scheduler.Controller
+	CostModel workloadcost.Model
+	TempDir   string
+	MaxQueue  int
+	Logger    *slog.Logger
 }
 
 // Runner is the VOD service.
@@ -78,6 +82,7 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.TempDir == "" {
 		cfg.TempDir = os.TempDir()
 	}
+	cfg.CostModel = cfg.CostModel.Normalized()
 	return &Runner{cfg: cfg, active: map[string]bool{}}, nil
 }
 
@@ -108,12 +113,16 @@ func (r *Runner) Submit(ctx context.Context, j types.Job) (types.Job, error) {
 func (r *Runner) pop() string {
 	r.queueMu.Lock()
 	defer r.queueMu.Unlock()
-	if len(r.queue) == 0 {
-		return ""
+	for len(r.queue) > 0 {
+		id := r.queue[0]
+		r.queue = r.queue[1:]
+		if r.active[id] {
+			continue
+		}
+		r.active[id] = true
+		return id
 	}
-	id := r.queue[0]
-	r.queue = r.queue[1:]
-	return id
+	return ""
 }
 
 // QueueDepth returns the current queue length.
@@ -121,6 +130,18 @@ func (r *Runner) QueueDepth() int {
 	r.queueMu.Lock()
 	defer r.queueMu.Unlock()
 	return len(r.queue)
+}
+
+// ActiveCount returns the current number of in-flight jobs.
+func (r *Runner) ActiveCount() int {
+	r.queueMu.Lock()
+	defer r.queueMu.Unlock()
+	return len(r.active)
+}
+
+// MaxConcurrent returns the configured VOD worker-pool width.
+func (r *Runner) MaxConcurrent() int {
+	return r.cfg.MaxQueue
 }
 
 // ResumeAll loads non-terminal jobs from the repo and re-queues them. Call
@@ -145,30 +166,52 @@ func (r *Runner) ResumeAll(ctx context.Context) error {
 
 // Run is the worker loop. Returns when ctx is cancelled.
 func (r *Runner) Run(ctx context.Context) error {
+	var wg sync.WaitGroup
+	for i := 0; i < r.cfg.MaxQueue; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.worker(ctx)
+		}()
+	}
+	<-ctx.Done()
+	wg.Wait()
+	return ctx.Err()
+}
+
+// RunOne runs a single job by id. Public so tests can drive the runner
+// without spawning the worker loop.
+func (r *Runner) RunOne(ctx context.Context, id string) error { return r.runOne(ctx, id) }
+
+func (r *Runner) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 		default:
 		}
 		id := r.pop()
 		if id == "" {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return
 			case <-time.After(50 * time.Millisecond):
 			}
 			continue
 		}
-		if err := r.runOne(ctx, id); err != nil {
+		err := r.runOne(ctx, id)
+		r.finish(id)
+		if err != nil && !errors.Is(err, context.Canceled) {
 			r.cfg.Logger.Error("jobrunner.run_one", "job_id", id, "error", err)
 		}
 	}
 }
 
-// RunOne runs a single job by id. Public so tests can drive the runner
-// without spawning the worker loop.
-func (r *Runner) RunOne(ctx context.Context, id string) error { return r.runOne(ctx, id) }
+func (r *Runner) finish(id string) {
+	r.queueMu.Lock()
+	defer r.queueMu.Unlock()
+	delete(r.active, id)
+}
 
 func (r *Runner) runOne(ctx context.Context, id string) error {
 	j, err := r.cfg.Repo.Get(ctx, id)
@@ -215,6 +258,18 @@ func (r *Runner) runOne(ctx context.Context, id string) error {
 			// surface in GetJob detail.
 		}
 	}()
+	var lease scheduler.Lease
+	if r.cfg.Scheduler != nil {
+		lease, err = r.cfg.Scheduler.Acquire(ctx, scheduler.Request{
+			Workload: scheduler.WorkloadBatch,
+			Slots:    1,
+			Cost:     r.cfg.CostModel.ForPreset(preset),
+		})
+		if err != nil {
+			return r.failJob(ctx, id, types.ErrCodeCapacityExceeded, err)
+		}
+		defer lease.Release()
+	}
 	res, err := r.cfg.FFmpeg.Run(ctx, ffmpeg.Job{
 		InputURL: srcPath, OutputURL: dstPath, Preset: preset, GPU: r.cfg.GPU,
 	}, progressCh)

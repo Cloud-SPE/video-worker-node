@@ -1,0 +1,98 @@
+# Unified H.264 worker catalogue.
+#
+# This file intentionally combines VOD, ABR, and live presets so a single
+# worker process can boot with one preset source. Live runtimes filter the
+# `*-live` rungs into the encoder ladder; VOD and ABR callers still select
+# presets by exact name.
+presets:
+  - name: 240p-h264
+    codec: h264
+    width_max: 426
+    height_max: 240
+    bitrate_kbps: 400
+    profile: main
+    gop_seconds: 2.0
+  - name: 360p-h264
+    codec: h264
+    width_max: 640
+    height_max: 360
+    bitrate_kbps: 800
+    profile: main
+    gop_seconds: 2.0
+  - name: 480p-h264
+    codec: h264
+    width_max: 854
+    height_max: 480
+    bitrate_kbps: 1400
+    profile: main
+    gop_seconds: 2.0
+  - name: 720p-h264
+    codec: h264
+    width_max: 1280
+    height_max: 720
+    bitrate_kbps: 2500
+    profile: main
+    gop_seconds: 2.0
+  - name: 1080p-h264
+    codec: h264
+    width_max: 1920
+    height_max: 1080
+    bitrate_kbps: 5000
+    profile: high
+    gop_seconds: 2.0
+  - name: abr-360p
+    codec: h264
+    width_max: 640
+    height_max: 360
+    bitrate_kbps: 800
+    profile: main
+    gop_seconds: 2.0
+  - name: abr-720p
+    codec: h264
+    width_max: 1280
+    height_max: 720
+    bitrate_kbps: 2500
+    profile: main
+    gop_seconds: 2.0
+  - name: abr-1080p
+    codec: h264
+    width_max: 1920
+    height_max: 1080
+    bitrate_kbps: 5000
+    profile: high
+    gop_seconds: 2.0
+  - name: 240p-h264-live
+    codec: h264
+    width_max: 426
+    height_max: 240
+    bitrate_kbps: 400
+    profile: baseline
+    gop_seconds: 4.0
+  - name: 360p-h264-live
+    codec: h264
+    width_max: 640
+    height_max: 360
+    bitrate_kbps: 800
+    profile: baseline
+    gop_seconds: 4.0
+  - name: 480p-h264-live
+    codec: h264
+    width_max: 854
+    height_max: 480
+    bitrate_kbps: 1400
+    profile: main
+    gop_seconds: 4.0
+  - name: 720p-h264-live
+    codec: h264
+    width_max: 1280
+    height_max: 720
+    bitrate_kbps: 2800
+    profile: main
+    gop_seconds: 4.0
+  - name: 1080p-h264-live
+    codec: h264
+    width_max: 1920
+    height_max: 1080
+    bitrate_kbps: 5000
+    profile: high
+    gop_seconds: 4.0

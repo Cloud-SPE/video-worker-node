@@ -1,7 +1,7 @@
 ---
 title: Payment integration
 status: accepted
-last-reviewed: 2026-04-26
+last-reviewed: 2026-05-03
 ---
 
 # Payment integration
@@ -59,7 +59,9 @@ Gateway (livepeer-video-gateway)
   │
   │                              ▼
   │              Worker (livepeer-video-worker-node)
-  │                ├─ payment-daemon (receiver mode, co-located) validates
+  │                ├─ payment-daemon (receiver mode, co-located) opens
+  │                │   OpenSession(work_id, capability, offering, price, work_unit)
+  │                ├─ payment-daemon validates
   │                │   ProcessPayment(payment_bytes, work_id)
   │                ├─ DebitBalance(estimated_units)
   │                ├─ FFmpeg subprocess does the work
@@ -83,6 +85,7 @@ For live HLS (one open session → many continuous debits):
 ```
 Gateway resolves worker, mints initial payment credit, opens worker session
   │
+  └─ Worker: OpenSession(work_id, capability, offering, price_per_work_unit_wei, work_unit)
   └─ Worker: ProcessPayment(payment_bytes, work_id)
                               ↑ worker_session_id + work_id
                                 ↓

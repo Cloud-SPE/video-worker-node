@@ -22,12 +22,14 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/Cloud-SPE/video-worker-node/internal/config"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/probe"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/scheduler"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/abrrunner"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/jobrunner"
@@ -67,6 +69,7 @@ type Server struct {
 	maxConc            int
 	registryCaps       []config.RegistryCapability
 	liveSessions       *liveSessionRegistry
+	scheduler          scheduler.Controller
 }
 
 // Config wires the Server.
@@ -89,6 +92,7 @@ type Config struct {
 	Logger               *slog.Logger
 	PublicRTMPURL        string // e.g., rtmp://ingest.example.com:1935/live
 	MaxConcurrent        int    // for /health reporting
+	Scheduler            scheduler.Controller
 }
 
 // New constructs a Server.
@@ -115,6 +119,7 @@ func New(cfg Config) (*Server, error) {
 		maxConc:            cfg.MaxConcurrent,
 		registryCaps:       cloneRegistryCapabilities(cfg.RegistryCapabilities),
 		liveSessions:       newLiveSessionRegistry(),
+		scheduler:          cfg.Scheduler,
 	}, nil
 }
 
@@ -151,6 +156,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	if s.liveRunner != nil {
 		resp["active_streams"] = s.liveRunner.ActiveCount()
+	}
+	if s.scheduler != nil {
+		snap := s.scheduler.Snapshot()
+		resp["gpu_scheduler"] = map[string]any{
+			"total_slots":         snap.TotalSlots,
+			"live_reserved_slots": snap.LiveReservedSlots,
+			"total_cost":          snap.TotalCost,
+			"live_reserved_cost":  snap.LiveReservedCost,
+			"active_slots":        snap.ActiveSlots,
+			"active_batch_slots":  snap.ActiveBatchSlots,
+			"active_live_slots":   snap.ActiveLiveSlots,
+			"active_cost":         snap.ActiveCost,
+			"active_batch_cost":   snap.ActiveBatchCost,
+			"active_live_cost":    snap.ActiveLiveCost,
+			"queued_batch_jobs":   snap.QueuedBatch,
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -316,6 +337,7 @@ type VODSubmitRequest struct {
 	InputURL      string `json:"input_url"`
 	OutputURL     string `json:"output_url"`
 	Preset        string `json:"preset"`
+	Offering      string `json:"offering,omitempty"`
 	WebhookURL    string `json:"webhook_url,omitempty"`
 	WebhookSecret string `json:"webhook_secret,omitempty"`
 	WorkID        string `json:"work_id,omitempty"`
@@ -324,10 +346,6 @@ type VODSubmitRequest struct {
 }
 
 func (s *Server) handleVODSubmit(w http.ResponseWriter, r *http.Request) {
-	if !s.mode.IsVOD() {
-		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in vod mode")
-		return
-	}
 	var req VODSubmitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
@@ -337,7 +355,27 @@ func (s *Server) handleVODSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_fields", "job_id, input_url, output_url, preset are required")
 		return
 	}
-	sender, balance, code := s.maybeProcessPayment(r.Context(), r, req.PaymentTicket, req.WorkID)
+	workID := firstNonEmpty(req.WorkID, req.JobID)
+	if s.payment != nil && !s.dev {
+		if _, code, err := s.decodeRequestPayment(r, req.PaymentTicket, true); err != nil {
+			if code == http.StatusPaymentRequired {
+				writeError(w, code, "payment", "missing payment ticket")
+			} else {
+				writeError(w, code, "bad_ticket", err.Error())
+			}
+			return
+		}
+	}
+	if err := s.openSessionForRequest(r.Context(), paymentSessionRequest{
+		WorkID:     workID,
+		Capability: "video:transcode.vod",
+		Preset:     req.Preset,
+		Offering:   req.Offering,
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "session_binding", err.Error())
+		return
+	}
+	sender, balance, code := s.maybeProcessPayment(r.Context(), r, req.PaymentTicket, workID)
 	if code != 0 {
 		writeError(w, code, "payment", "ticket validation failed")
 		return
@@ -350,7 +388,7 @@ func (s *Server) handleVODSubmit(w http.ResponseWriter, r *http.Request) {
 		ID: req.JobID, Mode: types.ModeVOD,
 		InputURL: req.InputURL, OutputURL: req.OutputURL, Preset: req.Preset,
 		WebhookURL: req.WebhookURL, WebhookSecret: req.WebhookSecret,
-		WorkID: req.WorkID, Sender: sender, UnitsPer: req.UnitsPer,
+		WorkID: workID, Sender: sender, UnitsPer: req.UnitsPer,
 	})
 	if err != nil {
 		var je *types.JobError
@@ -364,7 +402,7 @@ func (s *Server) handleVODSubmit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id":  job.ID,
 		"phase":   string(job.Phase),
-		"work_id": req.WorkID,
+		"work_id": workID,
 		"balance": balance,
 	})
 }
@@ -394,6 +432,7 @@ type ABRSubmitRequest struct {
 	InputURL         string            `json:"input_url"`
 	MasterOutputURL  string            `json:"master_output_url"`
 	PresetNames      []string          `json:"presets"`
+	Offering         string            `json:"offering,omitempty"`
 	RenditionOutputs map[string]string `json:"rendition_outputs"`
 	WebhookURL       string            `json:"webhook_url,omitempty"`
 	WebhookSecret    string            `json:"webhook_secret,omitempty"`
@@ -403,10 +442,6 @@ type ABRSubmitRequest struct {
 }
 
 func (s *Server) handleABRSubmit(w http.ResponseWriter, r *http.Request) {
-	if !s.mode.IsABR() {
-		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in abr mode")
-		return
-	}
 	var req ABRSubmitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
@@ -416,7 +451,31 @@ func (s *Server) handleABRSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_fields", "job_id, input_url, presets are required")
 		return
 	}
-	sender, balance, code := s.maybeProcessPayment(r.Context(), r, req.PaymentTicket, req.WorkID)
+	workID := firstNonEmpty(req.WorkID, req.JobID)
+	if s.payment != nil && !s.dev {
+		if _, code, err := s.decodeRequestPayment(r, req.PaymentTicket, true); err != nil {
+			if code == http.StatusPaymentRequired {
+				writeError(w, code, "payment", "missing payment ticket")
+			} else {
+				writeError(w, code, "bad_ticket", err.Error())
+			}
+			return
+		}
+	}
+	abrPresetHint := ""
+	if len(req.PresetNames) == 1 {
+		abrPresetHint = req.PresetNames[0]
+	}
+	if err := s.openSessionForRequest(r.Context(), paymentSessionRequest{
+		WorkID:     workID,
+		Capability: "video:transcode.abr",
+		Preset:     abrPresetHint,
+		Offering:   req.Offering,
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "session_binding", err.Error())
+		return
+	}
+	sender, balance, code := s.maybeProcessPayment(r.Context(), r, req.PaymentTicket, workID)
 	if code != 0 {
 		writeError(w, code, "payment", "ticket validation failed")
 		return
@@ -428,7 +487,7 @@ func (s *Server) handleABRSubmit(w http.ResponseWriter, r *http.Request) {
 	plan := abrrunner.ABRJob{
 		JobID: req.JobID, InputURL: req.InputURL, MasterOutputURL: req.MasterOutputURL,
 		WebhookURL: req.WebhookURL, WebhookSecret: req.WebhookSecret,
-		WorkID: req.WorkID, Sender: sender, UnitsPerRend: req.UnitsPerRend,
+		WorkID: workID, Sender: sender, UnitsPerRend: req.UnitsPerRend,
 		PresetNames: req.PresetNames, RenditionOutputs: req.RenditionOutputs,
 	}
 	if err := s.abrRunner.Submit(r.Context(), plan); err != nil {
@@ -442,6 +501,7 @@ func (s *Server) handleABRSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id":  req.JobID,
+		"work_id": workID,
 		"balance": balance,
 	})
 }
@@ -473,6 +533,7 @@ type StreamStartRequest struct {
 	WorkID        string `json:"work_id,omitempty"`
 	StreamID      string `json:"stream_id,omitempty"`
 	Preset        string `json:"preset"`
+	Offering      string `json:"offering,omitempty"`
 	WebhookURL    string `json:"webhook_url,omitempty"`
 	WebhookSecret string `json:"webhook_secret,omitempty"`
 	PaymentTicket string `json:"payment_ticket,omitempty"`
@@ -482,6 +543,7 @@ type SessionStartRequest struct {
 	GatewaySessionID string `json:"gateway_session_id,omitempty"`
 	SessionID        string `json:"session_id,omitempty"`
 	Preset           string `json:"preset,omitempty"`
+	Offering         string `json:"offering,omitempty"`
 	WebhookURL       string `json:"webhook_url,omitempty"`
 	WebhookSecret    string `json:"webhook_secret,omitempty"`
 }
@@ -518,10 +580,6 @@ type StreamStartResponse struct {
 }
 
 func (s *Server) handleStreamStart(w http.ResponseWriter, r *http.Request) {
-	if !s.mode.IsLive() {
-		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
-		return
-	}
 	var req StreamStartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
@@ -545,9 +603,33 @@ func (s *Server) handleStreamStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, code, "bad_ticket", err.Error())
 		return
 	}
+	var sender []byte
+	workerSessionID := deriveWorkerSessionID(workID)
+	if err := s.openSessionForRequest(r.Context(), paymentSessionRequest{
+		WorkID:     workID,
+		Capability: "video:live.rtmp",
+		Preset:     req.Preset,
+		Offering:   req.Offering,
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "session_binding", err.Error())
+		return
+	}
+	if s.payment != nil && !s.dev {
+		receipt, err := s.payment.ProcessPayment(r.Context(), ticket, workID)
+		if err != nil {
+			writeError(w, http.StatusPaymentRequired, types.ErrCodeInvalidPayment, err.Error())
+			return
+		}
+		sender = append([]byte(nil), receipt.Sender...)
+	}
 	stream, err := s.liveRunner.Start(r.Context(), liverunner.StartRequest{
-		WorkID: workID, PaymentTicket: ticket, Preset: req.Preset,
-		WebhookURL: req.WebhookURL, WebhookSecret: req.WebhookSecret,
+		WorkID:          workID,
+		Sender:          sender,
+		PaymentTicket:   ticket,
+		PaymentWorkID:   workID,
+		WorkerSessionID: workerSessionID,
+		Preset:          req.Preset,
+		WebhookURL:      req.WebhookURL, WebhookSecret: req.WebhookSecret,
 	})
 	if err != nil {
 		var je *types.JobError
@@ -573,10 +655,6 @@ func (s *Server) handleStreamStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
-	if !s.mode.IsLive() {
-		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
-		return
-	}
 	var req SessionStartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
@@ -610,6 +688,15 @@ func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	}
 	workID := deriveSessionWorkID(ticket)
 	workerSessionID := deriveWorkerSessionID(workID)
+	if err := s.openSessionForRequest(r.Context(), paymentSessionRequest{
+		WorkID:     workID,
+		Capability: "video:live.rtmp",
+		Preset:     preset,
+		Offering:   req.Offering,
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "session_binding", err.Error())
+		return
+	}
 	var sender []byte
 	if s.payment != nil && !s.dev {
 		receipt, err := s.payment.ProcessPayment(r.Context(), ticket, workID)
@@ -661,10 +748,6 @@ type StreamStopRequest struct {
 }
 
 func (s *Server) handleStreamStop(w http.ResponseWriter, r *http.Request) {
-	if !s.mode.IsLive() {
-		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
-		return
-	}
 	var req StreamStopRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
@@ -695,10 +778,6 @@ type StreamTopupRequest struct {
 }
 
 func (s *Server) handleStreamTopup(w http.ResponseWriter, r *http.Request) {
-	if !s.mode.IsLive() {
-		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
-		return
-	}
 	var req StreamTopupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
@@ -717,6 +796,12 @@ func (s *Server) handleStreamTopup(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, code, "bad_ticket", err.Error())
 		return
+	}
+	if s.payment != nil && !s.dev {
+		if _, _, code := s.maybeProcessPayment(r.Context(), r, req.PaymentTicket, workID); code != 0 {
+			writeError(w, code, "payment", "ticket validation failed")
+			return
+		}
 	}
 	if err := s.liveRunner.Topup(r.Context(), workID, ticket); err != nil {
 		var je *types.JobError
@@ -740,10 +825,6 @@ func (s *Server) handleStreamTopup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionTopup(w http.ResponseWriter, r *http.Request) {
-	if !s.mode.IsLive() {
-		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
-		return
-	}
 	gatewaySessionID := strings.TrimSpace(r.PathValue("gateway_session_id"))
 	if gatewaySessionID == "" {
 		writeError(w, http.StatusBadRequest, "missing_fields", "gateway_session_id is required")
@@ -820,10 +901,6 @@ func (s *Server) handleStreamStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
-	if !s.mode.IsLive() {
-		writeError(w, http.StatusNotImplemented, "wrong_mode", "daemon is not in live mode")
-		return
-	}
 	gatewaySessionID := strings.TrimSpace(r.PathValue("gateway_session_id"))
 	if gatewaySessionID == "" {
 		writeError(w, http.StatusBadRequest, "missing_fields", "gateway_session_id is required")
@@ -878,6 +955,73 @@ func (s *Server) maybeProcessPayment(ctx context.Context, r *http.Request, bodyT
 		return nil, nil, http.StatusPaymentRequired
 	}
 	return receipt.Sender, receipt.BalanceWei, 0
+}
+
+type paymentSessionRequest struct {
+	WorkID     string
+	Capability string
+	Preset     string
+	Offering   string
+}
+
+func (s *Server) openSessionForRequest(ctx context.Context, req paymentSessionRequest) error {
+	if s.payment == nil || s.dev {
+		return nil
+	}
+	binding, err := s.resolveSessionBinding(req)
+	if err != nil {
+		return err
+	}
+	return s.payment.OpenSession(ctx, binding)
+}
+
+func (s *Server) resolveSessionBinding(req paymentSessionRequest) (paymentbroker.SessionBinding, error) {
+	if strings.TrimSpace(req.WorkID) == "" {
+		return paymentbroker.SessionBinding{}, errors.New("work_id is required")
+	}
+	capIdx := slices.IndexFunc(s.registryCaps, func(cap config.RegistryCapability) bool {
+		return cap.Name == req.Capability
+	})
+	if capIdx < 0 {
+		return paymentbroker.SessionBinding{}, fmt.Errorf("capability %q is not configured", req.Capability)
+	}
+	capability := s.registryCaps[capIdx]
+	offering, err := resolveOffering(capability, req.Offering, req.Preset)
+	if err != nil {
+		return paymentbroker.SessionBinding{}, err
+	}
+	return paymentbroker.SessionBinding{
+		WorkID:              req.WorkID,
+		Capability:          capability.Name,
+		Offering:            offering.ID,
+		PricePerWorkUnitWei: offering.PricePerWorkUnitWei,
+		WorkUnit:            capability.WorkUnit,
+	}, nil
+}
+
+func resolveOffering(capability config.RegistryCapability, requestedOffering string, presetHint string) (config.RegistryOffering, error) {
+	if requestedOffering != "" {
+		for _, offering := range capability.Offerings {
+			if offering.ID == requestedOffering {
+				return offering, nil
+			}
+		}
+		return config.RegistryOffering{}, fmt.Errorf("offering %q is not configured for capability %q", requestedOffering, capability.Name)
+	}
+	if presetHint != "" {
+		for _, offering := range capability.Offerings {
+			if offering.ID == presetHint {
+				return offering, nil
+			}
+			if preset, _ := offering.Constraints["preset"].(string); preset == presetHint {
+				return offering, nil
+			}
+		}
+	}
+	if len(capability.Offerings) == 1 {
+		return capability.Offerings[0], nil
+	}
+	return config.RegistryOffering{}, fmt.Errorf("offering is required for capability %q when multiple offerings are configured", capability.Name)
 }
 
 func (s *Server) decodeRequestPayment(r *http.Request, bodyTicket string, required bool) ([]byte, int, error) {

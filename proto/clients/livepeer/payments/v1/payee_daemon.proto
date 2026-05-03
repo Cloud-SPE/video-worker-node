@@ -33,16 +33,23 @@ service PayeeDaemon {
   // worker's /capabilities HTTP response.
   rpc ListCapabilities(ListCapabilitiesRequest) returns (ListCapabilitiesResponse);
 
+  // Open a payee-side session and bind authoritative pricing metadata to
+  // `work_id`. The worker later seals the session's sender on the first
+  // successful ProcessPayment.
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+
   // Validate an incoming payment blob, credit the sender's balance by the
   // payment's expected value, and queue any winning tickets for redemption.
+  // Requires a previously-opened session for `work_id`.
   rpc ProcessPayment(ProcessPaymentRequest) returns (ProcessPaymentResponse);
 
-  // Debit work units from a (sender, work_id) balance after the payee has
-  // actually done the work. Returns the new balance.
+  // Debit session-priced work units from a (sender, work_id) balance after the
+  // payee has actually done the work. Retries are idempotent by
+  // (sender, work_id, debit_seq). Returns the new balance.
   rpc DebitBalance(DebitBalanceRequest) returns (DebitBalanceResponse);
 
   // Check whether a (sender, work_id) balance covers a minimum number of
-  // work units, without debiting.
+  // session-priced work units, without debiting.
   rpc SufficientBalance(SufficientBalanceRequest) returns (SufficientBalanceResponse);
 
   // Get the current balance for a (sender, work_id) pair.
@@ -92,7 +99,11 @@ message GetTicketParamsRequest {
   // configured recipient when provided.
   bytes recipient = 2;
 
-  // Exact requested ticket face value in wei, big-endian bytes.
+  // Target spend / expected-value request in wei, big-endian bytes, for the
+  // quote-free sender/payee flow. The receiver may return a larger
+  // TicketParams.face_value when redemption economics require a redeemable
+  // winning ticket, paired with a lower win probability so expected spend stays
+  // aligned with this request.
   bytes face_value = 3;
 
   // Optional capability / offering metadata for logging and future metrics.
@@ -146,13 +157,41 @@ message CapabilityEntry {
   repeated OfferingPrice offerings = 3;
 }
 
+message OpenSessionRequest {
+  // Opaque session identifier chosen by the payee app.
+  string work_id = 1;
+
+  // Capability the session is opened against.
+  string capability = 2;
+
+  // Offering the session is opened against.
+  string offering = 3;
+
+  // Authoritative price per work unit for this session (wei, big-endian
+  // bytes).
+  bytes price_per_work_unit_wei = 4;
+
+  // Work-unit identifier for this session ("token", "second", ...).
+  string work_unit = 5;
+}
+
+message OpenSessionResponse {
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    OUTCOME_OPENED = 1;
+    OUTCOME_ALREADY_OPEN = 2;
+  }
+
+  Outcome outcome = 1;
+}
+
 message ProcessPaymentRequest {
   // Wire-format `livepeer.payments.v1.Payment` bytes, exactly as received
   // from the sender.
   bytes payment_bytes = 1;
 
-  // Opaque session identifier chosen by the payee app. The daemon uses this
-  // as the balance key.
+  // Opaque session identifier chosen by the payee app. The daemon requires
+  // a previously-opened session with this id.
   string work_id = 2;
 }
 
@@ -181,6 +220,10 @@ message DebitBalanceRequest {
 
   // Number of work units actually consumed.
   int64 work_units = 3;
+
+  // Monotonic debit sequence number within the session. Retries of the same
+  // logical debit must reuse the same value.
+  uint64 debit_seq = 4;
 }
 
 message DebitBalanceResponse {
@@ -192,6 +235,7 @@ message DebitBalanceResponse {
 message SufficientBalanceRequest {
   bytes sender = 1;
   string work_id = 2;
+  // Minimum required runway in session-priced work units.
   int64 min_work_units = 3;
 }
 
@@ -216,7 +260,15 @@ message PayeeDaemonCloseSessionRequest {
   string work_id = 2;
 }
 
-message PayeeDaemonCloseSessionResponse {}
+message PayeeDaemonCloseSessionResponse {
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    OUTCOME_CLOSED = 1;
+    OUTCOME_ALREADY_CLOSED = 2;
+  }
+
+  Outcome outcome = 1;
+}
 
 message ListPendingRedemptionsRequest {
   // Optional: filter to tickets queued on or after this Unix epoch seconds.

@@ -21,8 +21,10 @@ import (
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/ffmpeg"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/hls"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/probe"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/scheduler"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/storage"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/webhooks"
+	"github.com/Cloud-SPE/video-worker-node/internal/providers/workloadcost"
 	"github.com/Cloud-SPE/video-worker-node/internal/repo/jobs"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/paymentbroker"
 	"github.com/Cloud-SPE/video-worker-node/internal/service/presetloader"
@@ -31,16 +33,19 @@ import (
 
 // Config wires the runner.
 type Config struct {
-	Repo    *jobs.Repo
-	FFmpeg  ffmpeg.Runner
-	Probe   probe.Prober
-	Storage storage.Storage
-	Webhook webhooks.Sender
-	Payment paymentbroker.Broker
-	Presets *presetloader.Loader
-	GPU     types.GPUProfile
-	TempDir string
-	Logger  *slog.Logger
+	Repo          *jobs.Repo
+	FFmpeg        ffmpeg.Runner
+	Probe         probe.Prober
+	Storage       storage.Storage
+	Webhook       webhooks.Sender
+	Payment       paymentbroker.Broker
+	Presets       *presetloader.Loader
+	GPU           types.GPUProfile
+	Scheduler     scheduler.Controller
+	CostModel     workloadcost.Model
+	MaxConcurrent int
+	TempDir       string
+	Logger        *slog.Logger
 }
 
 // Runner is the ABR service.
@@ -48,6 +53,7 @@ type Runner struct {
 	cfg     Config
 	queueMu sync.Mutex
 	queue   []string
+	active  map[string]bool
 }
 
 // ABRJob carries the ABR-specific request: a single input + a list of
@@ -89,7 +95,11 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.TempDir == "" {
 		cfg.TempDir = os.TempDir()
 	}
-	return &Runner{cfg: cfg}, nil
+	if cfg.MaxConcurrent <= 0 {
+		cfg.MaxConcurrent = 1
+	}
+	cfg.CostModel = cfg.CostModel.Normalized()
+	return &Runner{cfg: cfg, active: map[string]bool{}}, nil
 }
 
 // Submit persists a parent VOD-style job + a meta-record indicating the
@@ -140,12 +150,16 @@ func (r *Runner) saveRenditionPlan(ctx context.Context, j ABRJob) error {
 func (r *Runner) pop() string {
 	r.queueMu.Lock()
 	defer r.queueMu.Unlock()
-	if len(r.queue) == 0 {
-		return ""
+	for len(r.queue) > 0 {
+		id := r.queue[0]
+		r.queue = r.queue[1:]
+		if r.active[id] {
+			continue
+		}
+		r.active[id] = true
+		return id
 	}
-	id := r.queue[0]
-	r.queue = r.queue[1:]
-	return id
+	return ""
 }
 
 // QueueDepth returns the current queue length.
@@ -153,6 +167,18 @@ func (r *Runner) QueueDepth() int {
 	r.queueMu.Lock()
 	defer r.queueMu.Unlock()
 	return len(r.queue)
+}
+
+// ActiveCount returns the current number of in-flight ABR parent jobs.
+func (r *Runner) ActiveCount() int {
+	r.queueMu.Lock()
+	defer r.queueMu.Unlock()
+	return len(r.active)
+}
+
+// MaxConcurrent returns the configured ABR parent-job worker-pool width.
+func (r *Runner) MaxConcurrent() int {
+	return r.cfg.MaxConcurrent
 }
 
 // RunOne runs one ABR job to completion. Public for tests.
@@ -200,14 +226,31 @@ func (r *Runner) RunOne(ctx context.Context, id string, plan ABRJob) error {
 			for range progress {
 			}
 		}()
+		var lease scheduler.Lease
+		if r.cfg.Scheduler != nil {
+			lease, err = r.cfg.Scheduler.Acquire(ctx, scheduler.Request{
+				Workload: scheduler.WorkloadBatch,
+				Slots:    1,
+				Cost:     r.cfg.CostModel.ForPreset(preset),
+			})
+			if err != nil {
+				return r.failJob(ctx, id, types.ErrCodeCapacityExceeded, err)
+			}
+		}
 		if _, err := r.cfg.FFmpeg.Run(ctx, ffmpeg.Job{
 			InputURL: srcPath, OutputURL: rendOut, Preset: preset, GPU: r.cfg.GPU,
 		}, progress); err != nil {
+			if lease != nil {
+				lease.Release()
+			}
 			var je *types.JobError
 			if errors.As(err, &je) {
 				return r.failJob(ctx, id, je.Code, err)
 			}
 			return r.failJob(ctx, id, types.ErrCodeEncodingFailed, err)
+		}
+		if lease != nil {
+			lease.Release()
 		}
 		// Make sure a file exists for the upload step (FakeRunner does not
 		// write a file; real ffmpeg does).
@@ -270,30 +313,53 @@ func (r *Runner) RunOne(ctx context.Context, id string, plan ABRJob) error {
 
 // Run is the worker loop driver. The plan is held in r.plans.
 func (r *Runner) Run(ctx context.Context, plan func(id string) (ABRJob, bool)) error {
+	var wg sync.WaitGroup
+	for i := 0; i < r.cfg.MaxConcurrent; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.worker(ctx, plan)
+		}()
+	}
+	<-ctx.Done()
+	wg.Wait()
+	return ctx.Err()
+}
+
+func (r *Runner) worker(ctx context.Context, plan func(id string) (ABRJob, bool)) {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 		default:
 		}
 		id := r.pop()
 		if id == "" {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return
 			case <-time.After(50 * time.Millisecond):
 			}
 			continue
 		}
 		j, ok := plan(id)
 		if !ok {
+			r.finish(id)
 			r.cfg.Logger.Warn("abrrunner.no_plan", "job_id", id)
 			continue
 		}
-		if err := r.RunOne(ctx, id, j); err != nil {
+		err := r.RunOne(ctx, id, j)
+		r.finish(id)
+		if err != nil && !errors.Is(err, context.Canceled) {
 			r.cfg.Logger.Error("abrrunner.run_one", "job_id", id, "error", err)
 		}
 	}
+}
+
+func (r *Runner) finish(id string) {
+	r.queueMu.Lock()
+	defer r.queueMu.Unlock()
+	delete(r.active, id)
 }
 
 func (r *Runner) failJob(ctx context.Context, id, code string, err error) error {

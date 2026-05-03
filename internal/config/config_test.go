@@ -67,6 +67,8 @@ func TestValidateRequiredFields(t *testing.T) {
 		{func(c *Config) { c.FFmpegBin = "" }, "ffmpeg_bin"},
 		{func(c *Config) { c.MaxQueueSize = 0 }, "max_queue_size"},
 		{func(c *Config) { c.TempDir = "" }, "temp_dir"},
+		{func(c *Config) { c.GPUBatchCostScale = 0 }, "gpu_batch_cost_scale"},
+		{func(c *Config) { c.GPULiveCostScale = 0 }, "gpu_live_cost_scale"},
 		{func(c *Config) { c.HTTPListen = "" }, "http_listen"},
 		{func(c *Config) { c.PresetsFile = "" }, "presets_file"},
 	}

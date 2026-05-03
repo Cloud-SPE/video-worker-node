@@ -11,6 +11,7 @@ import (
 
 	"github.com/Cloud-SPE/video-worker-node/internal/config"
 	"github.com/Cloud-SPE/video-worker-node/internal/providers/paymentclient"
+	"github.com/Cloud-SPE/video-worker-node/internal/types"
 )
 
 func TestRunHelpFlag(t *testing.T) {
@@ -215,5 +216,24 @@ func TestVerifyPaymentDaemonCatalogDetectsMismatch(t *testing.T) {
 	err := verifyPaymentDaemonCatalog(cfg, daemon)
 	if err == nil || !strings.Contains(err.Error(), "offering[0] id worker=") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLiveLadderFiltersUnifiedCatalogue(t *testing.T) {
+	t.Parallel()
+	presets := []types.Preset{
+		{Name: "720p-h264"},
+		{Name: "abr-1080p"},
+		{Name: "720p-h264-live"},
+		{Name: "1080p-h264-live"},
+	}
+	got := liveLadder(presets)
+	if len(got) != 2 {
+		t.Fatalf("len=%d want 2", len(got))
+	}
+	for _, preset := range got {
+		if !strings.HasSuffix(preset.Name, "-live") {
+			t.Fatalf("unexpected preset %q", preset.Name)
+		}
 	}
 }
