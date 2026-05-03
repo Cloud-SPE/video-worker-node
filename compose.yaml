@@ -26,7 +26,7 @@ name: livepeer-video-worker
 
 services:
   payment-daemon:
-    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v4.0.0}
+    image: tztcloud/livepeer-payment-daemon:${PAYMENT_DAEMON_TAG:-v4.0.1}
     command:
       - "--mode=receiver"
       - "--socket=/var/run/livepeer/payment.sock"

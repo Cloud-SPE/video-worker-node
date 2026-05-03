@@ -167,7 +167,7 @@ Reconciliation is over-debit only: if `actual < est` the ledger stays ahead; we 
 Live mode follows the **streaming-session pattern**: one
 `OpenSession` + initial `ProcessPayment` per session, then periodic
 `DebitBalance` calls keyed to RTMP keepalive. The worker now consumes
-the released payee-side contract from `livepeer-payment-daemon v4.0.0`:
+the released payee-side contract from `livepeer-payment-daemon v4.0.1`:
 pending session open, sender sealing on first payment, wire-level
 `debit_seq`, and terminal `CloseSession`.
 

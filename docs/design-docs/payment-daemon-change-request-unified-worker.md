@@ -10,7 +10,7 @@ This document is the worker repo's formal handoff record for the
 payment-daemon work required by plan
 [`../exec-plans/active/0009-unified-multi-mode-worker-and-gpu-scheduler.md`](../exec-plans/active/0009-unified-multi-mode-worker-and-gpu-scheduler.md).
 
-`livepeer-payment-daemon v4.0.0` implemented the released payee session
+`livepeer-payment-daemon v4.0.1` is the current released payee session
 contract this request asked for: `OpenSession`, sender sealing on first
 `ProcessPayment`, wire-level `debit_seq`, and terminal `CloseSession`.
 This document is retained for traceability and rollout context.
@@ -278,7 +278,7 @@ payment-team signoff bar is:
 ## Current external state
 
 The payment-team contract request has now been satisfied by
-`livepeer-payment-daemon v4.0.0`, and the worker repo has integrated
+`livepeer-payment-daemon v4.0.1`, and the worker repo has integrated
 that released surface.
 
 Worker-side verification of the released daemon confirmed that the

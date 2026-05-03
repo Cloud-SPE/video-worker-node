@@ -341,9 +341,9 @@ session/storage failures into `InvalidArgument`. Worker-side
 production-readiness therefore remains blocked on payment fixes, not
 only on formal review.
 
-### 2026-05-03 — External payment contract blocker cleared by payment-daemon v4.0.0
+### 2026-05-03 — External payment contract blocker cleared by payment-daemon v4.0.1
 Reason: a targeted worker-side recheck of the released
-`livepeer-payment-daemon v4.0.0` confirmed that the previously-blocking
+`livepeer-payment-daemon v4.0.1` confirmed that the previously-blocking
 payee issues are now fixed: `ProcessPayment` validates the session
 target before redemption side effects, `DebitBalance` enforces replay
 consistency for `(sender, work_id, debit_seq)`, and unknown payee

@@ -83,7 +83,7 @@ make docker-build DOCKER_TARGET=runtime-amd    DOCKER_TAG=dev
 The worker expects the payment-daemon unix socket at the configured path:
 - `--payment-socket` — `payment-daemon` (receiver mode), co-located on the same host.
 
-Current compose/examples in this repo pin `livepeer-payment-daemon v4.0.0`
+Current compose/examples in this repo pin `livepeer-payment-daemon v4.0.1`
 and use `/var/run/livepeer/payment.sock` to match the published image's
 socket convention.
 
